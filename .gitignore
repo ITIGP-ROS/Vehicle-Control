@@ -1,0 +1,16 @@
+# PlatformIO build output
+.pio/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Backups - the development workspace used *.orig timestamped copies; none of
+# them belong in this repository.
+*.orig
+*.orig.*

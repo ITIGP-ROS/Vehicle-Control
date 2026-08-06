@@ -1,0 +1,169 @@
+VERSION "3.0"
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: TIVA JETSON CLUSTER HOST ESP32
+
+
+BO_ 256 VelocityCommand: 8 JETSON
+ SG_ rightVelSetpoint : 32|32@1+ (1,0) [0|0] "rad/s"  TIVA
+ SG_ leftVelSetpoint : 0|32@1+ (1,0) [0|0] "rad/s"  TIVA
+
+BO_ 272 VelocityFeedback: 8 TIVA
+ SG_ rightTicks : 32|32@1- (1,0) [0|0] "ticks"  JETSON
+ SG_ leftTicks : 0|32@1- (1,0) [0|0] "ticks"  JETSON
+
+BO_ 288 SteeringCommand: 8 JETSON
+ SG_ steeringSetpoint : 0|32@1+ (1,0) [0|0] "rad"  TIVA
+
+BO_ 304 SteeringFeedback: 8 TIVA
+ SG_ saturated : 35|1@1+ (1,0) [0|0] ""  JETSON,CLUSTER
+ SG_ out_of_range : 34|1@1+ (1,0) [0|0] ""  JETSON,CLUSTER
+ SG_ pot_fault : 33|1@1+ (1,0) [0|0] ""  JETSON,CLUSTER
+ SG_ at_target : 32|1@1+ (1,0) [0|0] ""  JETSON,CLUSTER
+ SG_ steeringAngle : 0|32@1+ (1,0) [0|0] "rad"  JETSON,CLUSTER
+
+BO_ 320 ResetCommand: 1 JETSON
+ SG_ reset : 0|8@1+ (1,0) [0|1] ""  TIVA
+
+BO_ 336 ImuAccel: 8 TIVA
+ SG_ reserved : 56|8@1+ (1,0) [0|255] ""  JETSON
+ SG_ sequence : 48|8@1+ (1,0) [0|255] ""  JETSON
+ SG_ accel_z : 32|16@1- (0.001,0) [-32.768|32.767] "m/s^2"  JETSON
+ SG_ accel_y : 16|16@1- (0.001,0) [-32.768|32.767] "m/s^2"  JETSON
+ SG_ accel_x : 0|16@1- (0.001,0) [-32.768|32.767] "m/s^2"  JETSON
+
+BO_ 352 ImuGyroFlags: 8 TIVA
+ SG_ sequence : 56|8@1+ (1,0) [0|255] ""  JETSON
+ SG_ imu_reset : 48|8@1+ (1,0) [0|1] ""  JETSON
+ SG_ gyro_z : 32|16@1- (0.001,0) [-32.768|32.767] "rad/s"  JETSON
+ SG_ gyro_y : 16|16@1- (0.001,0) [-32.768|32.767] "rad/s"  JETSON
+ SG_ gyro_x : 0|16@1- (0.001,0) [-32.768|32.767] "rad/s"  JETSON
+
+BO_ 512 VehicleStatus: 8 TIVA
+ SG_ odo_m : 40|24@1+ (1,0) [0|16777215] "m"  CLUSTER
+ SG_ trip_m : 24|16@1+ (1,0) [0|65535] "m"  CLUSTER
+ SG_ gear : 16|8@1+ (1,0) [0|2] ""  CLUSTER
+ SG_ speed : 0|16@1+ (1,0) [0|65535] "m/min"  CLUSTER
+
+BO_ 528 BatteryStatus: 8 TIVA
+ SG_ range : 48|16@1+ (1,0) [0|65535] "m"  CLUSTER
+ SG_ power : 32|16@1- (1,0) [-32768|32767] "W"  CLUSTER
+ SG_ soc : 24|8@1+ (1,0) [0|100] "%"  CLUSTER
+ SG_ current : 8|16@1- (0.01,0) [-327.68|327.67] "A"  CLUSTER
+ SG_ voltage : 0|8@1+ (0.1,0) [0|25.5] "V"  CLUSTER
+
+BO_ 1952 NodePingRequest: 1 HOST
+ SG_ seq : 0|8@1+ (1,0) [0|255] ""  TIVA,JETSON,ESP32
+
+BO_ 1953 NodePingRespTiva: 1 TIVA
+ SG_ seq : 0|8@1+ (1,0) [0|255] ""  HOST
+
+BO_ 1954 NodePingRespJetson: 1 JETSON
+ SG_ seq : 0|8@1+ (1,0) [0|255] ""  HOST
+
+BO_ 1955 NodePingRespEsp32: 1 ESP32
+ SG_ seq : 0|8@1+ (1,0) [0|255] ""  HOST
+
+
+
+
+CM_ BU_ TIVA "TM4C123 low-level motor/steering controller";
+CM_ BU_ JETSON "Orin NX high-level ROS2 controller";
+CM_ BU_ CLUSTER "Instrument cluster display (speed/gear)";
+CM_ BU_ HOST "Bus supervisor that originates the node liveness ping (0x7A0) and watches for the three responses";
+CM_ BU_ ESP32 "ESP32 node - responds to the liveness ping on 0x7A3. Not implemented by this repo.";
+CM_ BO_ 256 "Per-wheel velocity setpoints (Ackermann: 2 independent rear drives)";
+CM_ SG_ 256 rightVelSetpoint "Right rear wheel velocity setpoint";
+CM_ SG_ 256 leftVelSetpoint "Left rear wheel velocity setpoint";
+CM_ BO_ 272 "Cumulative signed encoder ticks per wheel (odometry source)";
+CM_ SG_ 272 rightTicks "Right wheel cumulative signed encoder ticks";
+CM_ SG_ 272 leftTicks "Left wheel cumulative signed encoder ticks";
+CM_ BO_ 288 "Steering angle setpoint (separate frame from velocity, per contract)";
+CM_ SG_ 288 steeringSetpoint "Steering angle setpoint (+left, REP-103)";
+CM_ BO_ 304 "Measured steering angle + status bitfield. Broadcast: consumed by BOTH JETSON and CLUSTER - the cluster reuses this frame rather than duplicating the angle into a cluster-specific frame.";
+CM_ SG_ 304 saturated "b3 SATURATED: the servo command hit its pulse-width limit.";
+CM_ SG_ 304 out_of_range "b2 OUT_OF_RANGE: the requested angle exceeded the mechanical travel and was clamped.";
+CM_ SG_ 304 pot_fault "b1 POT_FAULT: steering pot reading implausible. CLUSTER should grey out the steering display when set.";
+CM_ SG_ 304 at_target "b0 AT_TARGET: the CLAMPED setpoint was reached. Because it refers to the clamped value, AT_TARGET together with OUT_OF_RANGE means the request exceeded travel, was clamped, and that limit was reached - so read AT_TARGET ONLY alongside OUT_OF_RANGE.";
+CM_ SG_ 304 steeringAngle "Measured steering angle from pot (+left, REP-103). Consumed by JETSON and rendered by CLUSTER.";
+CM_ BO_ 320 "Odometry reset: Tiva zeroes its encoder tick counters on receipt (Jetson sends once on activate; it does not self-zero)";
+CM_ SG_ 320 reset "1 = zero the encoder tick counters now. Only bit 0 is meaningful; the whole byte is reserved so the Jetson's existing 1-byte payload maps directly. Fire-and-forget: no acknowledgement frame is sent or expected.";
+CM_ BO_ 336 "IMU accelerometer X/Y/Z with sequence counter. 1 LSB = 0.001 m/s^2.";
+CM_ SG_ 336 reserved "Reserved (byte 7), send 0";
+CM_ SG_ 336 sequence "Sample-cycle counter (byte 6). MUST equal ImuGyroFlags.sequence for the same sample - the Jetson rejects the whole read when they differ.";
+CM_ SG_ 336 accel_z "Accelerometer Z (bytes 4-5)";
+CM_ SG_ 336 accel_y "Accelerometer Y (bytes 2-3)";
+CM_ SG_ 336 accel_x "Accelerometer X (bytes 0-1)";
+CM_ BO_ 352 "IMU gyroscope X/Y/Z, IMU reset flag and sequence counter. 1 LSB = 0.001 rad/s.";
+CM_ SG_ 352 sequence "Sample-cycle counter (byte 7 - NOT byte 6 as in ImuAccel). MUST equal ImuAccel.sequence for the same sample.";
+CM_ SG_ 352 imu_reset "1 = the IMU was re-initialised/crashed and recovered (byte 6). The Jetson forces gyro Z to 0 and holds its existing calibration while this is set.";
+CM_ SG_ 352 gyro_z "Gyroscope Z (bytes 4-5). The TIVA pre-inverts this to the robot frame; the Jetson applies no host-side inversion.";
+CM_ SG_ 352 gyro_y "Gyroscope Y (bytes 2-3)";
+CM_ SG_ 352 gyro_x "Gyroscope X (bytes 0-1)";
+CM_ BO_ 512 "Instrument-cluster display status: vehicle speed + gear + trip distance (Tiva -> cluster)";
+CM_ SG_ 512 odo_m "LIFETIME odometer in metres, bytes 5-7, 1 LSB = 1 m. 24-BIT ON PURPOSE: it must outlive trip_m's uint16 (65.5 km), which a permanent odometer passes quickly. 24 bits reaches 16 777 215 m = 16 777 km - decades for this robot - and fills 0x200's last three free bytes exactly, so no new frame and no new TX slot were needed. PERSISTENT: held in the Tiva's internal EEPROM, written every 10 m of travel, and RESTORED ON BOOT - it survives resets and power cycles. It is NOT zeroed by 0x140 ResetCommand (that zeroes trip_m only), and there is no way to clear it over CAN by design. SATURATES at the signal max rather than wrapping. Worst-case loss on a sudden power-off is one write interval, i.e. 10 m.";
+CM_ SG_ 512 trip_m "TRIP distance in metres, bytes 3-4, 1 LSB = 1 m. Accumulated on the Tiva as TOTAL PATH LENGTH (the absolute value of each increment), so reversing ADDS distance like a real trip meter rather than subtracting. RESET-RELATIVE, NOT a lifetime ODO: it zeroes on every Tiva power-cycle/reset. SATURATES at 65535 m (65.5 km) rather than wrapping. A permanent ODO needs non-volatile storage on the Tiva and is deliberately NOT this signal. See `odo_m` in bytes 5-7, which IS that signal.";
+CM_ SG_ 512 gear "Gear/direction enum at BYTE 2 (moved from byte 1 when speed widened): 0=N, 1=D, 2=R, derived from encoder direction. No Park - this vehicle has no parking pawl.";
+CM_ SG_ 512 speed "Vehicle speed (converted from encoder rad/s on Tiva). Bytes 0-1, 1 LSB = 1 m/min. UNIT CHANGED 2026-08-05 from 0.1 km/h: this robot runs 0.7-2 m/s, which is 2-7 km/h (a display that looks parked) but 40-120 m/min. Whole m/min is deliberate - 1 m/min is 0.017 m/s, finer than the drive can hold, so tenths would only show noise. The signal range is the full uint16 span; the vehicle's real ceiling is far lower.";
+CM_ BO_ 528 "Battery/power status for the instrument cluster (Tiva->Cluster). Tiva plays the BMS role: computes SoC (coulomb counting + voltage re-anchor), power and range from the INA226. LAYOUT AND UNITS CHANGED 2026-08-05 (v2) - every signal moved; see the byte-budget note in build_dbc.py.";
+CM_ SG_ 528 range "Estimated remaining range, computed on the Tiva from remaining energy divided by recent consumption. BYTES 6-7, 1 LSB = 1 m (WIDENED 2026-08-05 from uint8 km - 255 km of headroom at 1 km resolution was useless on a robot whose display wants metres). CEILING: 65535 m = 65.5 km, and BATTERY_RANGE_MAX_KM was lowered from 255 to 65 to match, so a large estimate CLAMPS instead of silently wrapping to a plausible wrong number. 0 means NOT ESTIMABLE (stationary or charging), not 'empty'.";
+CM_ SG_ 528 power "Instantaneous power = voltage x current, computed on the Tiva. BYTES 4-5 (MOVED from 5-6), 1 LSB = 1 W. SCALE CHANGED 2026-08-05 from 0.1 kW: at 100 W/LSB this robot's entire 3-220 W range mapped to 0-2 counts, i.e. the signal was blind - confirmed on the wire in A3 step 4a, where 4.06 W transmitted as 0.0 kW. At 1 W/LSB the same range is 3-220 counts. THIS is the change that makes the POWER/REGEN strip move. Sign follows `current`: positive = discharge, negative = charge.";
+CM_ SG_ 528 soc "Battery state of charge. BYTE 3 (MOVED from byte 4 2026-08-05). Computed ON THE TIVA by coulomb counting re-anchored to an IR-compensated voltage->SoC LUT at rest (3S Li-ion, 9.0-12.6 V). The cluster renders this as-is. It is an ESTIMATE - accuracy is bounded by the provisional R_source.";
+CM_ SG_ 528 current "Bus current from the INA226. BYTES 1-2 (MOVED from 2-3 2026-08-05), 1 LSB = 0.01 A - resolution deliberately UNCHANGED. SIGN CONVENTION: POSITIVE = DISCHARGE (current leaving the battery), NEGATIVE = CHARGE (current into the battery).";
+CM_ SG_ 528 voltage "Bus voltage from the INA226. BYTE 0, 1 LSB = 0.1 V (NARROWED 2026-08-05 from uint16 x0.01 V to free a byte for the widened `range`). 0-25.5 V covers this 3S pack (9.0-12.6 V) with headroom. mV-precision voltage is not lost - it stays on the Tiva's UART heartbeat.";
+CM_ BO_ 1952 "Node liveness ping REQUEST, HOST -> all nodes, ~1 Hz. Every node answers on its own response id.";
+CM_ SG_ 1952 seq "Rolling request counter. Each node ECHOES THIS BYTE UNCHANGED in its own response, so the HOST can match a reply to the request that caused it and measure round-trip liveness.";
+CM_ BO_ 1953 "Node liveness ping RESPONSE from the TIVA. IMPLEMENTED IN THIS REPO: a dedicated RX message object matches 0x7A0 exactly (the 0x100/0x120 command filter cannot admit it), the seq is latched in the CAN dispatch with NO service involvement, and the echo is transmitted from its own super-loop slot (now%100==51) to preserve the one-Can_Transmit-per-millisecond invariant. Answered unconditionally - see the note on 0x7A0.";
+CM_ SG_ 1953 seq "Echo of NodePingRequest.seq, byte-for-byte unchanged. No node id in the payload - the FRAME ID identifies the responder.";
+CM_ BO_ 1954 "Node liveness ping RESPONSE from the JETSON. NOT this repo's responsibility - defined here so the bus definition is complete.";
+CM_ SG_ 1954 seq "Echo of NodePingRequest.seq, byte-for-byte unchanged. No node id in the payload - the FRAME ID identifies the responder.";
+CM_ BO_ 1955 "Node liveness ping RESPONSE from the ESP32. NOT this repo's responsibility - defined here so the bus definition is complete.";
+CM_ SG_ 1955 seq "Echo of NodePingRequest.seq, byte-for-byte unchanged. No node id in the payload - the FRAME ID identifies the responder.";
+
+
+
+VAL_ 304 saturated 0 "false" 1 "true" ;
+VAL_ 304 out_of_range 0 "false" 1 "true" ;
+VAL_ 304 pot_fault 0 "false" 1 "true" ;
+VAL_ 304 at_target 0 "false" 1 "true" ;
+VAL_ 320 reset 0 "off" 1 "on" ;
+VAL_ 352 imu_reset 0 "off" 1 "on" ;
+VAL_ 512 gear 0 "N" 1 "D" 2 "R" ;
+SIG_VALTYPE_ 256 leftVelSetpoint : 1;
+SIG_VALTYPE_ 256 rightVelSetpoint : 1;
+SIG_VALTYPE_ 288 steeringSetpoint : 1;
+SIG_VALTYPE_ 304 steeringAngle : 1;
+
+
