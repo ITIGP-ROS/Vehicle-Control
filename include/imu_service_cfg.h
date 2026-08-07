@@ -44,6 +44,26 @@
 #define IMU_REINIT_BACKOFF_CALLS    (25U)
 
 /*******************************************************************************
+ *                          imu_reset hold window (B13)                        *
+ *
+ * How many GOOD samples keep 0x160's `imu_reset` bit asserted after the IMU
+ * recovers from a fault.
+ *
+ * WHY THIS IS A LEVEL AND NOT A ONE-FRAME PULSE. The DBC words the bit as a
+ * state - "the Jetson forces gyro Z to 0 and holds its existing calibration
+ * WHILE this is set" - and the host cannot see a pulse reliably anyway: its
+ * read_sensor_values() drains the whole socket per cycle and keeps only the
+ * LAST frame of each ID, at 30 Hz against our 50 Hz. A single flagged frame is
+ * therefore MORE LIKELY TO BE DISCARDED THAN SEEN. Announcing a recovery that
+ * the consumer never observes is the same as not announcing it.
+ *
+ * 25 samples = 500 ms at the 50 Hz cadence ~= 15 host cycles, so the bit cannot
+ * be missed, and it matches IMU_REINIT_BACKOFF_CALLS's timescale above - the
+ * two windows describe the same fault episode from opposite ends.
+ *******************************************************************************/
+#define IMU_RESET_HOLD_SAMPLES      (25U)
+
+/*******************************************************************************
  *                          Accelerometer scale correction                     *
  *
  * Per-axis multiplier applied to the accelerometer AFTER the HAL's datasheet

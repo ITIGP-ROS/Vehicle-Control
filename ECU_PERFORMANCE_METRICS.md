@@ -2,12 +2,13 @@
 
 **Target:** TI TM4C123GH6PM · ARM Cortex-M4F @ **16 MHz** · 32 KB SRAM · 256 KB Flash
 **RTOS:** FreeRTOS v11.1.0 (MIT), GCC/ARM_CM4F port, **preemptive**, **static allocation only**
-**Scheduling:** fixed-priority preemptive, 10 tasks + idle · 1 kHz tick
-**Last measured:** 2026-08-06 · tags: **[M] = measured on hardware**, **[E] = estimated / worst-case bound**
+**Scheduling:** fixed-priority preemptive, **11 tasks** + idle · 1 kHz tick
+**Last measured:** 2026-08-07 (B13/B13b: tImu + IMU axis check) · tags: **[M] = measured on hardware**, **[E] = estimated / worst-case bound**
 
 > This is the standalone ECU analysis: WCET, CPU load, schedulability, jitter, interrupt latency, and
-> memory budget. Method is stated per metric so every number is reproducible. It complements
-> `RTOS_TIMING_RESOURCE_BUDGET.md` (the working analysis) — this is the clean summary.
+> memory budget. Method is stated per metric so every number is reproducible. This is the clean
+> summary; the longer working analysis it was distilled from lives in the development repository and
+> is deliberately not copied here (this repo is production firmware only).
 
 ---
 
@@ -15,12 +16,12 @@
 
 | Metric | Value | Verdict |
 |---|---|---|
-| **Total CPU utilization `U`** | **≈ 4.9 %** (incl. 2.0 % kernel tick) | 🟢 ~95 % headroom |
-| **Schedulability (RM bound, n=10)** | `U` 4.9 % vs bound **71.8 %** | 🟢 passes ~15× |
+| **Total CPU utilization `U`** | **≈ 8.6 %** (incl. 2.0 % kernel tick) | 🟢 ~91 % headroom |
+| **Schedulability (RM bound, n=11)** | `U` 8.6 % vs bound **71.4 %** | 🟢 passes ~8× |
 | **Schedulability (RTA, exact, `tVelocity`)** | worst-case response **≈ 95 µs** vs a **20,000 µs** deadline | 🟢 ~210× margin |
 | **Worst-case interrupt latency** | **≈ 4 µs** (masked) / **0.75 µs** (above syscall priority) | 🟢 |
-| **RAM usage (post stack-trim)** | **35.1 %** of 32 KB (was 68.3 %; 10,880 B freed) | 🟢 |
-| **Flash usage** | ~57 KB of 256 KB (kernel adds ~11 KB) | 🟢 |
+| **RAM usage** | **37.8 %** of 32 KB (B13 tImu adds ~0.9 KB) | 🟢 |
+| **Flash usage** | ~59 KB of 256 KB (kernel adds ~11 KB) | 🟢 |
 | **Memory model** | static allocation (MISRA-C:2012 Dir 4.12 / AUTOSAR "no dynamic memory after init") | 🟢 |
 
 ---
@@ -31,10 +32,11 @@
 
 | task | prio | `Ti` | `Ci` (WCET) | tag | `Ui` | notes |
 |---|---|---|---|---|---|---|
-| `tSafety` | 10 | 10 ms | **2 µs** steady | [E] | 0.01 % | command-loss failsafe: 2 counter loads + compare + tick read. Trip path non-recurrent |
-| `tVelocity` | 9 | **20 ms** (hard, QEI) | **60 µs** | [E] | 0.30 % | 2× QEI read + 2× PID (Tustin + deriv filter + anti-windup) + 2× Motor_SetSpeed. **Measured interval 20/20 ms, 0 early fires [M]** |
-| `tRosRx` | 8 | 33.3 ms, burst 2 | 20 µs/frame | [E] | 0.12 % | ISR-semaphore woken; routes steering+velocity per 30 Hz cycle |
-| `tBattery` | 7 | 100 ms | **479.9 µs** | **[M]** | 0.48 % | **MEASURED** — Ina226_ReadAll ~312 µs + ~168 µs SoC estimator |
+| `tSafety` | 11 | 10 ms | **2 µs** steady | [E] | 0.01 % | command-loss failsafe: 2 counter loads + compare + tick read. Trip path non-recurrent |
+| `tVelocity` | 10 | **20 ms** (hard, QEI) | **60 µs** | [E] | 0.30 % | 2× QEI read + 2× PID (Tustin + deriv filter + anti-windup) + 2× Motor_SetSpeed. **Measured interval 20/20 ms, 0 early fires [M]** |
+| `tRosRx` | 9 | 33.3 ms, burst 2 | 20 µs/frame | [E] | 0.12 % | ISR-semaphore woken; routes steering+velocity per 30 Hz cycle |
+| `tBattery` | 8 | 100 ms | **479.9 µs** | **[M]** | 0.48 % | **MEASURED** — Ina226_ReadAll ~312 µs + ~168 µs SoC estimator |
+| `tImu` | **7** | 20 ms | **927 µs** | **[M]** | **4.64 %** | ✅ **B13** — MPU6050 14-byte burst (15 capped I2C commands) + 2 packs + 2 posts. **Measured 847–927 µs; the 80 µs min–max spread proves this is execution, not interference.** 🔴 6.2× the 150 µs estimate |
 | `tCanTx` | 6 | event, 4.5 ms avg | 10 µs CPU | [E] | 0.22 % | pop + Can_Transmit load. The **222 µs on the wire is blocked time, not CPU** |
 | `tRosTx` | 4 | 10 ms (5 ms alt) | ≤ ~1.6 ms | [E] | — | 0x110/0x130; the 0x130 path does 8 ADC conversions, TIMER0-bounded at 200 µs each (see §5) |
 | `tClusterTx` | 3 | 100 ms | 30 µs | [E] | 0.03 % | 0x200 + 0x210 pack + posts |
@@ -52,7 +54,7 @@
 | `Ina226_ReadAll()` | min 307.8 / mean 311.8 / max 352.7 µs (200 calls, 0 err) | timer0 |
 | I2C largest single capped wait | ~60 µs (cap 200 µs → 3.3× headroom) | timer0 |
 | I2C command | read 120.4 / 149.2 µs, write 120.2 µs; 1 wire byte = 28.8 µs ⇒ **400 kHz confirmed** | timer0 |
-| CAN frame on the wire | ~222 µs (8-byte std @ 500 kbps); **~4.9 % bus load** at 221 fr/s | datasheet + candump |
+| CAN frame on the wire | ~222 µs (8-byte std @ 500 kbps); **~7.1 % bus load** at **320 fr/s** (was 4.9 % / 221 fr/s before B13 added 0x150+0x160) | datasheet + candump |
 | `tVelocity` Update interval | **20/20 ms min/max, 0 early fires** | on-target instrumentation |
 
 ⚠️ **WCET is worst-case EXECUTION, not response time.** Early attempts measured with a wall-clock
@@ -61,38 +63,15 @@
 
 ---
 
-
-### 2.1 Priority ladder and measured stacks (final, post stack-trim)
-
-Every task has a **distinct** priority: equal priorities time-slice under
-`configUSE_TIME_SLICING`, and a time-slice between two tasks that share a
-deadline or a bus is the same hazard as a mis-ordered pair.
-
-| prio | task | period | stack used / allocated | margin |
-|---|---|---|---|---|
-| 10 | `tSafety` | 10 ms | 67 / 128 words | 1.91× |
-| 9 | `tVelocity` | 20 ms | 66 / 128 | 1.94× |
-| 8 | `tRosRx` | event (ISR-woken) | 80 / 128 | 1.60× |
-| 7 | `tBattery` | 100 ms | 108 / 192 | 1.78× |
-| 6 | `tCanTx` | event (queue) | 52 / 128 | 2.46× |
-| 5 | `tBusHealth` | 100 ms | 31 / 192 | 6.19× ⚠️ |
-| 4 | `tRosTx` | 5 ms (alternating) | 92 / 160 | 1.74× |
-| 3 | `tClusterTx` | 50 ms (alternating) | 98 / 160 | 1.63× |
-| 2 | `tOdo` | 100 ms | 36 / 128 | 3.56× |
-| 1 | `tHeartbeat` | 1000 ms | 71 / 160 | 2.25× |
-
-⚠️ `tBusHealth` is deliberately over-allocated: its measured 31 words are the
-*no-bus-off* path only — the bus could not be forced off in the measurement
-session, so its deep branch (`VelocityControl_Stop()` + `Can_RecoverBusOff()`)
-is **unmeasured**. `tSafety` makes the same `Stop()` call at 67 words, so the
-deep branch is expected near that.
-
 ## 3. CPU utilization & schedulability
 
-**Total:** `U = Σ Ci/Ti ≈ 0.0475 ≈ 4.9 %` → headroom `1 − U ≈ 95.1 %`.
+**Total:** `U = Σ Ci/Ti ≈ 0.0864 ≈ 8.6 %` → headroom `1 − U ≈ 91.4 %`.
+⚠️ Was 4.9 % before B13. The jump is almost entirely `tImu`'s **measured** 927 µs against an
+estimated 150 µs — a bad estimate corrected by
+measurement, not a regression in anything that already existed.
 
-- **Rate-Monotonic sufficient test:** for n=10, the RM bound is `n(2^(1/n) − 1) ≈ 71.8 %`. `U = 4.9 %` is
-  ~15× under it → sufficient condition satisfied. (Note: our priority order is by **criticality**, not
+- **Rate-Monotonic sufficient test:** for n=11, the RM bound is `n(2^(1/n) − 1) ≈ 71.4 %`. `U = 8.6 %` is
+  ~8× under it → sufficient condition satisfied. (Note: our priority order is by **criticality**, not
   strictly rate-monotonic — `tSafety` outranks faster tasks — so RM is indicative; RTA is the exact test.)
 - **Response-Time Analysis (exact) for the hard deadline:** `R(tVelocity) ≈ 95 µs` against its **20 ms**
   QEI deadline → **~210× margin**. (Improved from 135 µs when the priority ladder was settled — moving
@@ -142,8 +121,8 @@ compiler/-O-dependent) and never unbounded:
 
 | resource | usage | ceiling | margin |
 |---|---|---|---|
-| **SRAM** | **35.1 %** (post-trim; 10,880 B freed from a deep-path mission) | 32 KB | 🟢 64.9 % free |
-| **Flash** | ~57 KB (kernel ~11 KB) | 256 KB | 🟢 ~78 % free |
+| **SRAM** | **37.8 %** (post-trim + B13's tImu: 768 B stack + TCB + one ready list) | 32 KB | 🟢 62.2 % free |
+| **Flash** | ~59 KB (kernel ~11 KB) | 256 KB | 🟢 ~77 % free |
 
 - **Static allocation** (`configSUPPORT_STATIC_ALLOCATION=1`, dynamic off): every task/queue/semaphore
   buffer is fixed at link time → insufficient RAM is a **linker error on the bench**, never a runtime
@@ -172,6 +151,34 @@ compiler/-O-dependent) and never unbounded:
 
 ## 8. What is NOT yet measured (recorded honestly, not claimed)
 
+- 🔴 **`tImu` I2C1 ROBUSTNESS — AN OPEN HARDWARE-LEVEL FAULT, NOT A TIMING GAP.** In the B13 session
+  the MPU6050 ran clean for ~300 s (≈15,000 samples, 0 dropped pairs) and then stopped answering
+  permanently: `WHO_AM_I` read back **0x00** and **an MCU reset did not recover it** (a reset does not
+  power-cycle the sensor, so a slave holding SDA low stays held). `imu_service`'s 500 ms backoff
+  re-init retried continuously and never succeeded.
+  **ISOLATED TO HARDWARE.** The harness reports **`i2c=BUS_BUSY, who_am_i=0x00`** — SDA or SCL held
+  **low**. A **full power-cycle did not clear it**, which excludes an I2C slave lockup (a stranded
+  slave releases SDA when powered down). And the **unmodified `mpu6050_bringup` harness — the same
+  binary that ran perfectly earlier in the same session — now fails identically**, so B13 did not
+  cause it. Suspect the PA6/PA7 or 3V3/GND leads / pull-ups / the module itself.
+  ⚠️ **Do not add an I2C bus-recovery routine on this evidence** — 9 SCL pulses free a stranded slave,
+  which the power-cycle result already excludes.
+  **Containment is proven and is what makes this non-blocking for the rest of the system:** the
+  `ImuService_HasSample()` gate meant the firmware published **nothing** rather than zeroes
+  (`imu=NOSAMPLE/seq0`, 0 × 0x150/0x160 on the wire, verified), the task collapsed to **9 µs**/cycle,
+  and the other four frames stayed at exactly 100/100/10/10 Hz.
+  **Next step:** physical — reseat/continuity-check the I2C1 leads or swap the module, then re-run
+  `pio run -e mpu6050_bringup -t upload` (prints `HEALTHY` when the sensor answers). The one B13
+  verification formerly outstanding — the **tilt/rotate axis-sign check** — is ✅ **DONE (B13b,
+  2026-08-07): all six motions PASS, CCW-yaw → +gz confirmed through the production TX path.**
+  ✅ The **180° mount yaw** it surfaced is now **corrected in firmware (B13c)**: `ImuService_Latch`
+  negates accel X/Y + gyro X/Y, gyro Z untouched. Re-verified: nose-up → +ax, left-side-up → +ay,
+  CCW-yaw → +gz unchanged.
+- 🟠 **Per-axis accelerometer scale** — `IMU_ACCEL_SCALE_CORR` is one scalar (1.1054) for all three
+  axes, but static holds show Z ~9 % low (needs it) while Y needs none, so |a| is orientation-
+  dependent by up to ~10 %. Needs a three-orientation calibration (+Z up, +X up, +Y up) to resolve
+  three independent axis gains — a magnitude measurement can only ever constrain one number, so the
+  three must not be inferred from fewer orientations. Gyro and the odometry-critical gz are unaffected.
 - **`tBusHealth` bus-off deep branch** — could not force a bus-off in the bench mock; over-provisioned.
 - **Charge-path timing** (current < 0) — needs a physical charger.
 - **The real Jetson's p99 command gap** — the mock injected deliberately-pessimistic jitter (no RT
@@ -181,5 +188,5 @@ compiler/-O-dependent) and never unbounded:
 
 ---
 
-*Metrics as of 2026-08-06. Reproduce via the methods in §7. Working analysis:
-`docs/RTOS_TIMING_RESOURCE_BUDGET.md`. Task ladder: `include/app_priorities.h`.*
+*Metrics as of 2026-08-07 (B13/B13b/B13c: tImu + the IMU axis check and mount correction).
+Reproduce via the methods in §7. Task ladder: `include/app_priorities.h`.*

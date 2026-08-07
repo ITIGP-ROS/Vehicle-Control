@@ -39,6 +39,7 @@
 #include "comm_data.h"         /* boundary: rad/s->RPM, cumulative tick getters      */
 #include "velocity_control.h"  /* control: VelocityControl_SetSetpoint (RPM)         */
 #include "steering_control.h"  /* control: SetAngle / GetSnapshot (S10-1 coherent)   */
+#include "imu_service.h"       /* B13: 0x150/0x160 source (accel, gyro, seq, reset)  */
 
 /* Expected payload length for every command/feedback frame (all are 8 bytes). */
 #define JETSON_COMM_FRAME_DLC   (8U)
@@ -333,4 +334,142 @@ Std_ReturnType JetsonComm_SendSteeringFeedback(void)
     }
 
     return E_OK;
+}
+
+/*******************************************************************************
+ *                    B13 - THE IMU PAIR (0x150 + 0x160)                       *
+ *
+ * ★ THE SEQUENCE CONTRACT IS THE WHOLE POINT OF THIS FUNCTION, so it is worth
+ * being explicit about what enforces it rather than trusting the shape of the
+ * code:
+ *
+ *   1. ONE acquisition. GetAccel/GetGyro/GetSequence/GetResetFlag are read once,
+ *      consecutively, with no ImuService_Update() anywhere between them. The
+ *      sample cannot advance mid-function (tImu is imu_service's single owner),
+ *      so all four describe the same instant.
+ *   2. ONE `seq` LOCAL, assigned to BOTH structs. There is deliberately no
+ *      second call to GetSequence() - a second call is the obvious way this
+ *      would silently break later, so the value is captured once and reused.
+ *      The two frames put it at DIFFERENT byte offsets (6 in ImuAccel, 7 in
+ *      ImuGyroFlags); the generated packers handle that, and nothing here needs
+ *      to know about it beyond not "fixing" the asymmetry.
+ *   3. PACK BOTH, THEN POST BOTH. If the second pack could fail after the first
+ *      frame was already on the queue, we would have shipped half a pair. So no
+ *      post happens until both packs have succeeded.
+ *
+ * ⚠️ AND THE PAIR IS DELIBERATELY POSTED BACK TO BACK, which is the one place
+ * B13 knowingly departs from the "<= 1 Can_Transmit per millisecond" wire
+ * property the phase plan otherwise preserves. That property is a proxy; the
+ * REAL invariant since B6 is "one transmit in flight at a time", and the queue
+ * still guarantees it structurally. Spacing the pair out would trade a proxy we
+ * like for a contract we must keep: the host drains the socket once per 30 Hz
+ * cycle and keeps only the LAST frame of each ID, so if its drain lands between
+ * our two frames it sees mismatched sequences and throws the ENTIRE read away.
+ * Adjacent posts shrink that window to one frame's wire time (~222 us in 20 ms,
+ * ~1 %); spacing them 10 ms apart would make it ~50 %. Adjacency is the safe
+ * direction, and the ~222 us pair gap is the documented price.
+ *******************************************************************************/
+Std_ReturnType JetsonComm_SendImuFrames(void)
+{
+    struct robot_imu_accel_t      acc;
+    struct robot_imu_gyro_flags_t gyr;
+    uint8   accelData[ROBOT_IMU_ACCEL_LENGTH];
+    uint8   gyroData[ROBOT_IMU_GYRO_FLAGS_LENGTH];
+    float32 ax, ay, az;
+    float32 gx, gy, gz;
+    uint8   seq;
+    int     packedAccel;
+    int     packedGyro;
+    Std_ReturnType rv = E_OK;
+
+    /* ⚠️ PUBLISH GATE - NOT a health check. Before the first good sample the
+     * service holds all zeroes with sequence 0, and because BOTH frames would
+     * carry that same 0 the host would happily accept them and fuse a reading
+     * of ZERO GRAVITY as real. Silence is the only honest output here.
+     *
+     * Note we do NOT gate on IsHealthy(): once a sample exists, a STALE one is
+     * the right thing to publish. Its sequence stops advancing, and a frozen
+     * sequence is precisely how the host detects staleness for itself. Gating on
+     * health would instead blank ~500 ms of frames for a single failed read. */
+    if (ImuService_HasSample() == FALSE)
+    {
+        return E_NOT_OK;
+    }
+
+    /* ---- (1) the single coherent acquisition ---- */
+    ImuService_GetAccel(&ax, &ay, &az);
+    ImuService_GetGyro(&gx, &gy, &gz);
+    seq = ImuService_GetSequence();          /* (2) read ONCE, used TWICE */
+
+    /* ⚠️ RANGE-CHECK BEFORE ENCODING, AND FAIL THE PAIR AS A UNIT.
+     * robot.h is explicit that _encode() overflows silently out of range: the
+     * wire is int16 x 0.001, i.e. +/-32.767. The configured ranges (+/-2 g =
+     * +/-19.6 m/s^2, +/-250 dps = +/-4.36 rad/s) cannot reach that, so in normal
+     * operation this never fires - it is here for a NaN (every comparison
+     * against NaN is false, so NaN fails the check and is caught) and for a
+     * future range change made without revisiting the DBC.
+     *
+     * ⚠️ If ANY axis fails we drop BOTH frames, never one. Dropping a single
+     * frame would leave the host holding one new sequence and one old one -
+     * exactly the mismatch that makes it discard the whole read. A clean pair or
+     * nothing. Clamping was rejected: a clamped value is a fabricated
+     * measurement presented as a real one. */
+    if ((robot_imu_accel_accel_x_is_in_phys_range((double)ax) == false) ||
+        (robot_imu_accel_accel_y_is_in_phys_range((double)ay) == false) ||
+        (robot_imu_accel_accel_z_is_in_phys_range((double)az) == false) ||
+        (robot_imu_gyro_flags_gyro_x_is_in_phys_range((double)gx) == false) ||
+        (robot_imu_gyro_flags_gyro_y_is_in_phys_range((double)gy) == false) ||
+        (robot_imu_gyro_flags_gyro_z_is_in_phys_range((double)gz) == false))
+    {
+        return E_NOT_OK;
+    }
+
+    /* ---- 0x150 ImuAccel ----
+     * The generated _encode() helpers own the 0.001 scaling, exactly as
+     * cluster_comm's BuildBatteryStatus notes: doing the division here would
+     * duplicate the DBC and silently diverge from it at the next regen. */
+    acc.accel_x  = robot_imu_accel_accel_x_encode((double)ax);
+    acc.accel_y  = robot_imu_accel_accel_y_encode((double)ay);
+    acc.accel_z  = robot_imu_accel_accel_z_encode((double)az);
+    acc.sequence = seq;
+    acc.reserved = 0U;                       /* DBC: "Reserved (byte 7), send 0" */
+
+    /* ---- 0x160 ImuGyroFlags ----
+     * ⚠️ NO NEGATE ON gyro_z HERE. The sensor->robot-frame transform has exactly
+     * ONE site and it is ImuService_Latch(); the getters already return
+     * robot-frame REP-103. Adding a second negate at pack time is the specific
+     * mistake imu_service.h warns against, and it is the same one-transform
+     * discipline steering_control follows. */
+    gyr.gyro_x    = robot_imu_gyro_flags_gyro_x_encode((double)gx);
+    gyr.gyro_y    = robot_imu_gyro_flags_gyro_y_encode((double)gy);
+    gyr.gyro_z    = robot_imu_gyro_flags_gyro_z_encode((double)gz);
+    gyr.imu_reset = (uint8)((ImuService_GetResetFlag() != FALSE) ? 1U : 0U);
+    gyr.sequence  = seq;                     /* ★ THE SAME VALUE. Never re-read. */
+
+    /* ---- (3) both packs must succeed before either post ---- */
+    packedAccel = robot_imu_accel_pack(accelData, &acc, (size_t)sizeof(accelData));
+    packedGyro  = robot_imu_gyro_flags_pack(gyroData, &gyr, (size_t)sizeof(gyroData));
+
+    if ((packedAccel < 0) || (packedGyro < 0))
+    {
+        return E_NOT_OK;
+    }
+
+    /* Post both regardless of the first one's result: if 0x150 was refused, the
+     * host will hold a stale accel against a fresh gyro and reject that cycle
+     * either way, so withholding 0x160 too would cost a second cycle for
+     * nothing. Both attempts are made; the caller is told if either failed. */
+    if (CanTxQueue_Post(ROBOT_IMU_ACCEL_FRAME_ID, accelData,
+                        (uint8)packedAccel) != CAN_OK)
+    {
+        rv = E_NOT_OK;
+    }
+
+    if (CanTxQueue_Post(ROBOT_IMU_GYRO_FLAGS_FRAME_ID, gyroData,
+                        (uint8)packedGyro) != CAN_OK)
+    {
+        rv = E_NOT_OK;
+    }
+
+    return rv;
 }

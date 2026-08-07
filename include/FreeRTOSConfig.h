@@ -100,18 +100,20 @@
 /*=============================================================================
  * 3. SCHEDULER
  *
- * configMAX_PRIORITIES = 11 => usable priorities 0 (idle) .. 10.
+ * configMAX_PRIORITIES = 12 => usable priorities 0 (idle) .. 11.
  *
  * ⚠️ THE LADDER IS NOT DEFINED HERE. It lives in ONE place, include/app_priorities.h,
  * with a justification per level. Raised from 6 to 10 on 2026-08-06 when the ladder
  * was settled: 6 levels could not give every interfering pair a DISTINCT level, and
  * sharing one is what produced the BUDGET-5 clash (tBattery parked on tVelocity's
  * slot). Cost of the extra 4 levels is ~80 bytes of ready-list array.
+ * Raised 11 -> 12 at B13 to open a level for tImu between tBattery and tCanTx
+ * (+20 bytes: one more List_t in the ready-list array).
  *
  * Summary (see app_priorities.h for why each sits where it does):
- *     10  tSafety      9  tVelocity   8  tRosRx     7  tBattery
- *      6  tCanTx       5  tBusHealth  4  tRosTx     3  tClusterTx
- *      2  tOdo         1  tHeartbeat  0  idle
+ *     11  tSafety     10  tVelocity   9  tRosRx     8  tBattery
+ *      7  tImu         6  tCanTx      5  tBusHealth 4  tRosTx
+ *      3  tClusterTx   2  tOdo        1  tHeartbeat 0  idle
  *
  * ⚠️ This is a CRITICALITY-monotonic assignment, NOT a rate-monotonic one -
  * tSafety has a 20 ms period yet outranks tRosTx at 10 ms. That is correct and
@@ -123,13 +125,13 @@
  * value now so no later step has to touch this file for it.
  *===========================================================================*/
 #define configUSE_PREEMPTION                        1
-#define configMAX_PRIORITIES                        ( 11 )
+#define configMAX_PRIORITIES                        ( 12 )
 #define configUSE_TIME_SLICING                      1
 #define configIDLE_SHOULD_YIELD                     1
 
 /* Cortex-M4 has CLZ, so the port can select the highest ready priority in
  * constant time instead of scanning the ready lists. Requires
- * configMAX_PRIORITIES <= 32 (portmacro.h:148-162 #errors otherwise); ours is 11. */
+ * configMAX_PRIORITIES <= 32 (portmacro.h:148-162 #errors otherwise); ours is 12. */
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION     1
 
 /* configMINIMAL_STACK_SIZE is in WORDS, not bytes: 128 words = 512 bytes. It

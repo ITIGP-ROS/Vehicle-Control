@@ -87,4 +87,29 @@ Std_ReturnType JetsonComm_SendVelocityFeedback(void);
  */
 Std_ReturnType JetsonComm_SendSteeringFeedback(void);
 
+/**
+ * @brief  Build and transmit the IMU PAIR - 0x150 ImuAccel AND 0x160
+ *         ImuGyroFlags - from ONE coherent sample, carrying ONE shared sequence.
+ *
+ * @return E_OK only if BOTH frames were staged. E_NOT_OK if no sample exists
+ *         yet, a value was out of the DBC's physical range, packing failed, or
+ *         either post was refused.
+ *
+ * ⚠️ THE TWO FRAMES ARE ONE UNIT, NOT TWO TRANSMITS THAT HAPPEN TO BE ADJACENT.
+ * The DBC requires ImuAccel.sequence == ImuGyroFlags.sequence for a sample, and
+ * the host REJECTS ITS WHOLE SENSOR READ - encoder ticks included - when they
+ * differ (can_comms.cpp read_sensor_values). Hence: one acquisition, one
+ * sequence value fed to both, both packed before either is posted, and the two
+ * posted back to back so they land in the same host drain window.
+ *
+ * ⚠️ CALL IT IMMEDIATELY AFTER ImuService_Update(), FROM THE SAME TASK, and
+ * never call ImuService_Update() between the two posts. This function reads the
+ * service's getters directly rather than taking a caller-supplied struct; that
+ * is coherent ONLY because tImu is the single owner of imu_service - the sole
+ * caller of Update and the sole reader of the getters - so no other context can
+ * advance the sample underneath it. If a second consumer of imu_service is ever
+ * added, this becomes a torn read and needs a snapshot API (the S10-1 pattern).
+ */
+Std_ReturnType JetsonComm_SendImuFrames(void);
+
 #endif /* JETSON_COMM_H_ */

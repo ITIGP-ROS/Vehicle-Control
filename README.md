@@ -8,7 +8,7 @@ It takes commands from a **Jetson running ROS 2** and publishes telemetry to an
 
 The firmware is written in bare-metal C against an **AUTOSAR-flavoured layered
 architecture** (MCAL → HAL → services → comm → application), and runs under
-**FreeRTOS in preemptive mode** as a **ten-task set with fully static memory
+**FreeRTOS in preemptive mode** as an **eleven-task set with fully static memory
 allocation** — no heap anywhere in the image.
 
 ```
@@ -16,8 +16,8 @@ allocation** — no heap anywhere in the image.
         │ Jetson (ROS) │ ──0x120 steering───►  │                  │
         │  30 Hz       │ ◄─0x110 wheel ticks── │  THIS ECU        │   ┌────────┐
         └──────────────┘   0x130 steering fb   │  TM4C123GH6PM    │──►│ motors │
-                                               │  FreeRTOS, 10    │   │ servo  │
-        ┌──────────────┐   0x200 vehicle       │  tasks, static   │◄──│ QEI    │
+                           0x150/0x160 IMU     │  FreeRTOS, 11    │   │ servo  │
+        ┌──────────────┐   0x200 vehicle       │  tasks, static   │◄──│ QEI+IMU│
         │   Cluster    │ ◄─0x210 battery────── │                  │   │ pot    │
         └──────────────┘                       └──────────────────┘   └────────┘
 ```
@@ -59,16 +59,17 @@ service↔comm seam.
 
 ### The task set
 
-Ten tasks, **every one at a distinct priority** — equal priorities time-slice,
+Eleven tasks, **every one at a distinct priority** — equal priorities time-slice,
 and a time-slice between tasks that share a deadline or a bus is the same hazard
 as a mis-ordered pair.
 
 | Prio | Task | Period | Role |
 |---|---|---|---|
-| **10** | `tSafety` | 10 ms | RX command-loss failsafe — nothing may preempt it |
-| **9** | `tVelocity` | 20 ms | Per-wheel velocity PID against the QEI window |
-| **8** | `tRosRx` | event | Routes `0x100`/`0x120`/`0x140` — woken by the CAN ISR |
-| **7** | `tBattery` | 100 ms | INA226 read + SoC estimator |
+| **11** | `tSafety` | 10 ms | RX command-loss failsafe — nothing may preempt it |
+| **10** | `tVelocity` | 20 ms | Per-wheel velocity PID against the QEI window |
+| **9** | `tRosRx` | event | Routes `0x100`/`0x120`/`0x140` — woken by the CAN ISR |
+| **8** | `tBattery` | 100 ms | INA226 read (I2C0) + SoC estimator |
+| **7** | `tImu` | 20 ms | MPU6050 read (I2C1) + packs `0x150`/`0x160` → 50 Hz each |
 | **6** | `tCanTx` | event | The **only** caller of `Can_Transmit`; drains the TX queue |
 | **5** | `tBusHealth` | 100 ms | CAN bus-off observation and recovery |
 | **4** | `tRosTx` | 5 ms | Packs `0x110` / `0x130`, alternating → 100 Hz each |
@@ -86,7 +87,16 @@ Two design points worth calling out:
   adding a sixth frame.
 - **Every periodic task is phase-locked to an absolute tick residue.** Phase is a
   property of the task *set*, not of one task: two producers waking on the same
-  tick would post two frames into one millisecond.
+  tick would post two frames into one millisecond. A new task's residue is
+  cleared against every existing one with the pairwise rule *two periods P,Q with
+  residues r,s can collide iff r ≡ s (mod gcd(P,Q))* — checking "mod 5" alone
+  only clears it against the fastest producer.
+- **A driver with a wall-clock timeout is effectively a real-time critical
+  section.** `i2c.c` caps each command against a free-running timer, so a task
+  preempting an I2C reader eats that margin directly. This is why `tBattery` and
+  `tImu` both sit **above** `tCanTx` (which wakes ~320×/s) despite carrying only
+  telemetry — getting it wrong once made the state-of-charge estimate silently
+  wrong by 42 %.
 
 ---
 
@@ -98,12 +108,12 @@ and the `[M]`easured / `[E]`stimated tag on every value are in
 
 | Metric | Value | |
 |---|---|---|
-| **CPU utilization** | **≈ 4.9 %** (of which the 1 kHz kernel tick is 2.0 %) | ~95 % headroom |
-| **Schedulability — RM bound** | 4.9 % against the n=10 bound of 71.8 % | passes ~15× |
+| **CPU utilization** | **≈ 8.6 %** (of which the 1 kHz kernel tick is 2.0 %) | ~91 % headroom |
+| **Schedulability — RM bound** | 8.6 % against the n=11 bound of 71.4 % | passes ~8× |
 | **Schedulability — RTA (exact)** | `R(tVelocity)` ≈ **95 µs** vs a **20 ms** deadline | ~210× margin |
 | **Worst-case interrupt latency** | ≈ **4 µs** masked / 0.75 µs above the syscall ceiling | |
-| **RAM** | **35.1 %** of 32 KB, after trimming stacks to measured worst-case | ≥1.60× margin on every task |
-| **Flash** | ~57 KB of 256 KB (the kernel is ~11 KB of it) | |
+| **RAM** | **37.8 %** of 32 KB, after trimming stacks to measured worst-case | ≥1.60× margin on every task |
+| **Flash** | ~59 KB of 256 KB (the kernel is ~11 KB of it) | |
 | **Memory model** | **Static allocation** — no heap in the image | MISRA-C:2012 Dir 4.12 |
 
 Notes on how those numbers were obtained, because the method is the point:
@@ -138,6 +148,8 @@ from which `robot.c`/`robot.h` are generated.
 | `0x140` | ResetCommand | Jetson → ECU | on activate | zero the encoder ticks and trip |
 | `0x110` | VelocityFeedback | ECU → Jetson | 100 Hz | cumulative signed wheel ticks, int32 |
 | `0x130` | SteeringFeedback | ECU → Jetson | 100 Hz | measured angle + status bits |
+| `0x150` | ImuAccel | ECU → Jetson | 50 Hz | accel x/y/z (int16 ×0.001 m/s²) + `sequence` |
+| `0x160` | ImuGyroFlags | ECU → Jetson | 50 Hz | gyro x/y/z (int16 ×0.001 rad/s), `imu_reset`, `sequence` |
 | `0x200` | VehicleStatus | ECU → cluster | 10 Hz | speed, gear, trip, odometer |
 | `0x210` | BatteryStatus | ECU → cluster | 10 Hz | voltage, current, SoC, power, range |
 | `0x7A0/1` | NodePing | host ↔ ECU | on demand | liveness echo |
@@ -145,6 +157,24 @@ from which `robot.c`/`robot.h` are generated.
 **Sign convention:** everything from the CAN boundary down to `steering_control`
 is REP-103 (+left). The servo HAL's native frame is inverted, and there is
 **exactly one** negate in the whole chain. Do not add a second.
+
+**The IMU pair `0x150`/`0x160` is ONE unit, not two frames.** Both carry the same
+`sequence` byte (at different offsets — 6 in ImuAccel, 7 in ImuGyroFlags), and
+the host **rejects its entire sensor read — encoder ticks included — if the two
+disagree**. They are therefore packed from a single sample and posted
+back-to-back, which is the one place this firmware deliberately spends the
+"≤ 1 transmit per millisecond" *wire* property: the real invariant (one transmit
+in flight) is still structural in the queue, and adjacency shrinks the host's
+tear window from ~50 % to ~1 %. Verified on the wire: 4,300+ pairs, 0 mismatches.
+
+**IMU frame:** the MPU6050 is physically mounted **180° yawed** (+X rear,
++Y right). The Tiva corrects that at its single transform site
+(`ImuService_Latch` negates accel X/Y and gyro X/Y), so what goes on the bus is a
+true REP-103 robot frame and **the host needs no axis remap**. ⚠️ Gyro **Z is
+deliberately not negated** — yaw rate is invariant under a yaw rotation, so it
+was already correct; "making it consistent" with X/Y would reintroduce a bug that
+was previously found and fixed on hardware. Gyro bias is sent **raw** by design;
+the host owns that calibration.
 
 ---
 

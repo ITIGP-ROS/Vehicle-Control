@@ -40,11 +40,18 @@
  *  inversion." Read that as a POLICY - the Tiva, not the host, owns delivering
  *  the robot-frame sign - not as an instruction to negate unconditionally.
  *
- *  For the CURRENT chip-up mounting that transform is the IDENTITY: an MPU6050
- *  mounted chip-up is already right-handed with +Z up, so raw gyro-Z is already
- *  positive-for-CCW, which is REP-103. All six axes are therefore pass-through
- *  today (accel additionally carries the scale correction).
+ *  For gyro Z that transform is the IDENTITY: an MPU6050 mounted chip-up is
+ *  already right-handed with +Z up, so raw gyro-Z is already positive-for-CCW,
+ *  which is REP-103.
  *  HARDWARE-VERIFIED 2026-08-01 (FIX_26): chip-up, CCW-from-top gives +gz.
+ *
+ *  ⚠️ UPDATED B13c (2026-08-07): the other four axes are NO LONGER pass-through.
+ *  The module is physically mounted 180 deg yawed from the robot frame (MEASURED
+ *  +X = REAR, +Y = RIGHT, +Z = up), so ImuService_Latch now NEGATES accel X/Y and
+ *  gyro X/Y. A 180 deg yaw maps (x,y,z) -> (-x,-y,z), so gyro Z and accel Z are
+ *  deliberately untouched - yaw rate is invariant under a yaw rotation, which is
+ *  precisely why FIX_26's gz result stayed valid and why the mount error hid for
+ *  so long. See the long block in ImuService_Latch for the measurements.
  *
  *  The transform still lives in exactly ONE place (ImuService_Latch), so a
  *  remount - chip-down, or the IMU rotated onto another axis - is a one-line
@@ -104,6 +111,57 @@ void ImuService_GetGyro(float32 *gx, float32 *gy, float32 *gz);
  * @brief  Latest die temperature in degrees Celsius.
  */
 float32 ImuService_GetTemp(void);
+
+/**
+ * @brief  TRUE once at least ONE good sample has ever been latched.
+ * @details B13 GATE - a CONSUMER MUST CHECK THIS BEFORE PUBLISHING.
+ *          Before the first successful read the held sample is all ZEROES and
+ *          the sequence is 0. Those zeroes are indistinguishable, on the wire,
+ *          from a real reading of "no acceleration at all" - and because BOTH
+ *          0x150 and 0x160 would carry the same sequence, they would pass the
+ *          Jetson's pairing check and be FUSED AS REAL DATA. A vehicle in free
+ *          fall is the only thing that legitimately reads 0 g.
+ *
+ *          IsHealthy() is NOT a substitute: it goes FALSE on a single failed
+ *          read and stays FALSE for up to IMU_REINIT_BACKOFF_CALLS, so gating
+ *          publication on it would blank ~500 ms of frames for one glitch.
+ *          The right behaviour there is to keep publishing the HELD sample with
+ *          its FROZEN sequence.
+ *
+ *          ⚠️ A FROZEN SEQUENCE IS DETECTABLE, BUT THE HOST DOES NOT CURRENTLY
+ *          DETECT IT. can_comms.cpp stores `expected_seq_`/`seq_initialized_`
+ *          (can_comms.hpp:47-48) and NEVER READS THEM - verified by grep - so
+ *          today it compares only accel-seq against gyro-seq, which a held
+ *          sample still satisfies. It will therefore fuse a stale sample as
+ *          fresh for as long as the fault lasts. That is a ROS-side follow-up,
+ *          not a reason to publish zeroes or go silent here: a frozen counter is
+ *          at least diagnosable from a capture, which zeroes are not.
+ *
+ *          So: HasSample() gates whether to publish AT ALL; IsHealthy() only
+ *          tells you whether the newest sample is fresh.
+ * @note    Latches TRUE and never clears except through ImuService_Init().
+ */
+boolean ImuService_HasSample(void);
+
+/**
+ * @brief  TRUE while the IMU should be reported as freshly RE-INITIALISED.
+ * @details Maps to the DBC's 0x160 `imu_reset` bit: "1 = the IMU was
+ *          re-initialised/crashed and recovered. The Jetson forces gyro Z to 0
+ *          and holds its existing calibration while this is set."
+ *
+ *          SET on the unhealthy -> healthy EDGE, and only when a good sample had
+ *          already been seen before the fault. The first-ever sample after boot
+ *          is deliberately NOT a reset: the host has no calibration to protect
+ *          yet, so announcing one would be noise.
+ *
+ *          HELD for IMU_RESET_HOLD_SAMPLES samples rather than a single frame,
+ *          because the signal is worthless if the host misses it. The host
+ *          drains at 30 Hz and keeps only the LAST frame of each cycle, so a
+ *          one-frame pulse at 50 Hz is genuinely likely to be dropped. The hold
+ *          is a level, which is exactly how the DBC words it ("WHILE this is
+ *          set"), not an event.
+ */
+boolean ImuService_GetResetFlag(void);
 
 /**
  * @brief  Free-running sample counter, 0..255, incremented once per GOOD sample.

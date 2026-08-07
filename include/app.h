@@ -31,6 +31,13 @@
  * @param  batteryOk  the init block's verdict on the A3 battery chain. FALSE
  *                    suppresses tBattery and the 0x210 alternation, mirroring
  *                    the old super-loop's "skip both battery slots" containment.
+ * @param  imuOk      whether the I2C bus came up, so tImu has something to talk
+ *                    to. ⚠️ This is NOT "the MPU6050 answered" - deliberately.
+ *                    imu_service retries an absent sensor on its own backoff and
+ *                    publishes nothing until a real sample exists, so a sensor
+ *                    that is missing or late at boot must NOT suppress the task
+ *                    the way a dead battery chain does. Only a dead BUS does,
+ *                    because that leaves nothing to retry.
  *
  * @note   Call ONCE, LAST, from main() - after every hardware Init has run and
  *         in particular after Can_Init(), since the CAN TX queue creates the
@@ -41,6 +48,6 @@
  * @note   FreeRTOS builds only. In a non-RTOS build this is a no-op returning
  *         E_NOT_OK, and main() runs the legacy super-loop instead.
  */
-Std_ReturnType App_Start(boolean batteryOk);
+Std_ReturnType App_Start(boolean batteryOk, boolean imuOk);
 
 #endif /* APP_H_ */

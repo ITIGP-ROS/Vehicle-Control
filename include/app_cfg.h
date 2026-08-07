@@ -326,12 +326,29 @@
  *      tClusterTx      50 ms   2 mod 50            2
  *      tBattery       100 ms  43 mod 100           3
  *      tOdo           100 ms  53 mod 100           3
+ *      tImu (B13)      20 ms   8 mod 20            3
  *
  * WHY MOD 5 IS THE THING TO CHECK: tRosTx is the fastest producer at 5 ms, so
  * any task whose residue is 0 mod 5 will periodically wake on the SAME tick it
  * does. tClusterTx (2), tBattery (3) and tOdo (3) all avoid that.
  * tBattery and tOdo share residue 3 mod 5 but are 43 vs 53 mod 100, so they
  * never coincide with each other either.
+ *
+ * ⚠️ HOW TO CHECK A NEW RESIDUE PROPERLY - two tasks with periods P and Q and
+ * residues r and s can EVER coincide iff r == s (mod gcd(P,Q)). Checking "mod 5"
+ * alone is a shortcut that only works against tRosTx. tImu's residue 8 mod 20
+ * was cleared against every existing task with that rule:
+ *      vs tRosTx    (5 ms,   0): gcd 5   -> 8%5=3  != 0  ✓
+ *      vs tSafety   (10 ms,  3): gcd 10  -> 8%10=8 != 3  ✓
+ *      vs tVelocity (20 ms,  7): gcd 20  -> 8     != 7   ✓
+ *      vs tClusterTx(50 ms,  2): gcd 10  -> 8%10=8 != 2  ✓
+ *      vs tBattery  (100 ms,43): gcd 20  -> 8 != 43%20=3 ✓
+ *      vs tOdo      (100 ms,53): gcd 20  -> 8 != 53%20=13✓
+ *      vs tBusHealth(100 ms,71): gcd 20  -> 8 != 71%20=11✓
+ *      vs tHeartbeat(1000ms,137):gcd 20  -> 8 != 137%20=17 ✓
+ * So tImu shares a wake tick with NOTHING. (It is 3 mod 5 like tBattery/tOdo,
+ * which is exactly why the pairwise gcd test above, not the mod-5 shortcut, is
+ * what actually clears it.)
  *
  * ⚠️ WHAT THIS BUYS, and why it is not merely tidy: two posts landing on one
  * tick would be serialised by tCanTx into two transmits ~222 us apart - which
@@ -514,6 +531,43 @@
 #define HEARTBEAT_TASK_PRIORITY    APP_PRIO_HEARTBEAT
 #define HEARTBEAT_TASK_PERIOD_MS   HEARTBEAT_MS           /* 1000 ms, unchanged */
 #define HEARTBEAT_TASK_PHASE_MS    (137U)
+
+/*----------------------------------------------------------------------------
+ * B13 - tImu (prio 7): the MPU6050 reader and the 0x150/0x160 producer.
+ *
+ * ⚠️ IT DOES ITS OWN TX, unlike tBattery. tBattery is Update-only (tClusterTx
+ * packs 0x210 from its published snapshot), and that split exists because 0x210
+ * is a 10 Hz status frame with no coherency requirement between it and anything
+ * else. The IMU is the opposite case: 0x150 and 0x160 MUST carry a matched
+ * sequence, and the cheapest way to guarantee that is to let the task that took
+ * the sample also be the task that ships it - no published snapshot to keep
+ * coherent, no second reader, no window in which another task could advance the
+ * sample between the two packs. Producing here is what makes the contract
+ * structural rather than a convention two files have to agree on.
+ *
+ * PERIOD 20 ms = 50 Hz, which is the rate imu_service was built for: the HAL
+ * programs SMPLRT_DIV = 19 for a 50 Hz internal sample rate, and
+ * IMU_REINIT_BACKOFF_CALLS's "25 calls ~= 500 ms" comment assumes it. Reading
+ * faster would re-read the same internal sample; slower would waste it.
+ *
+ * PHASE 8 mod 20 - cleared against every other task by the pairwise gcd test in
+ * the phase-plan block above. On the wire it puts the IMU pair at millisecond 8
+ * of each 20, between tRosTx's ticks at 5 and 10, so the nominal wire pattern
+ * per 10 ms decade becomes 0, 5, 8(+8) instead of just 0, 5.
+ *
+ * ⚠️ CREATED EVEN IF THE SENSOR DID NOT ANSWER AT BOOT - deliberately the
+ * OPPOSITE of tBattery's containment, and the difference is that imu_service has
+ * a recovery path where battery_service does not. A failed read short-circuits
+ * for free (the HAL forces itself NOT_INITIALIZED and never touches the bus),
+ * and a re-init is attempted only once per 25 calls, so a permanently absent IMU
+ * costs ~6 capped I2C commands twice a second and publishes NOTHING (the
+ * HasSample gate). An IMU that is merely late, or reseated at runtime, then
+ * starts producing on its own instead of needing a power cycle.
+ *--------------------------------------------------------------------------*/
+#define IMU_TASK_STACK_WORDS       (192U)  /* provisional - see the note below */
+#define IMU_TASK_PRIORITY          APP_PRIO_IMU
+#define IMU_TASK_PERIOD_MS         (20U)   /* 50 Hz - matches SMPLRT_DIV = 19  */
+#define IMU_TASK_PHASE_MS          (8U)    /* 8 mod 20 - see the phase plan    */
 
 #endif /* USE_FREERTOS */
 

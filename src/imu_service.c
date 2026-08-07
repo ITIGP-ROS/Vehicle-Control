@@ -34,31 +34,80 @@ static uint8   ImuService_Sequence  = 0U;
 /* Calls since the last re-init attempt. Only counts while unhealthy. */
 static uint16  ImuService_BackoffCount = 0U;
 
+/* B13. TRUE once a first good sample has ever been latched - the publish gate.
+ * Without it the all-zero boot state would go out as a VALID, correctly-paired
+ * reading of 0 g. See the long note on ImuService_HasSample() in the header. */
+static boolean ImuService_HasSampleFlag = FALSE;
+
+/* B13. Samples still to be published with 0x160's imu_reset bit SET. A level,
+ * not a pulse - see ImuService_GetResetFlag() in the header for why. */
+static uint16  ImuService_ResetHold = 0U;
+
 /*******************************************************************************
  *                          Private Helpers                                    *
  *******************************************************************************/
 
 /* Latch a raw HAL sample as the service's current sample.
  *
- * This is the ONE place the outgoing sample is shaped, and it does exactly two
+ * This is the ONE place the outgoing sample is shaped, and it does exactly three
  * things beyond copying:
- *   1. applies the accelerometer scale correction, and
- *   2. applies the sensor->robot-frame transform on gyro Z (currently the
- *      IDENTITY for this chip-up mounting - see the note at that line).
+ *   1. applies the accelerometer scale correction,
+ *   2. applies the 180 deg MOUNT YAW correction (B13c - see the block below), and
+ *   3. applies the sensor->robot-frame transform on gyro Z (the IDENTITY - see
+ *      the note at that line; do NOT change it).
  *
- * Both are done HERE, at latch, rather than in the getters, so that (a) there is
+ * All are done HERE, at latch, rather than in the getters, so that (a) there is
  * exactly one application site to audit - matching steering_control's
  * one-transform discipline - and (b) the sample held across a fault is already
  * the corrected, correctly-signed one, so a stale read is consistent with a
- * fresh read. */
+ * fresh read.
+ *
+ * =====================================================================
+ *  THE 180 DEG MOUNT YAW CORRECTION (B13c, 2026-08-07) - A MOUNT FACT,
+ *  NOT AN ARBITRARY SIGN CHOICE.
+ * =====================================================================
+ * The MPU6050 is physically mounted rotated 180 deg about +Z relative to the
+ * robot frame that the DBC, the URDF and the odometry all assume. MEASURED on
+ * hardware (B13b, 2026-08-07), decoding the live 0x150/0x160 frames:
+ *
+ *     nose UP, held        -> accelX -4.390  (26.5 deg tilt)  => sensor +X = REAR
+ *     left side UP, held   -> accelY -5.617  (34.0 deg tilt)  => sensor +Y = RIGHT
+ *     right side DOWN      -> accelY -10.75                   => +Y = RIGHT (again)
+ *
+ * (An accelerometer at rest reads +g on whichever axis points UP. accelX going
+ * NEGATIVE when the nose rose therefore means +X points at the REAR.)
+ * The frame is right-handed and self-consistent: rear x right = up. REP-103
+ * wants +X forward, +Y left, +Z up, so the sensor is a clean 180 deg yaw off.
+ *
+ * A 180 deg rotation about +Z maps (x, y, z) -> (-x, -y, z). Hence EXACTLY FOUR
+ * sign flips: accelX, accelY, gyroX, gyroY.
+ *
+ * ⚠️⚠️ gyroZ AND accelZ ARE DELIBERATELY NOT TOUCHED.
+ *   - YAW RATE IS INVARIANT UNDER A YAW ROTATION. gyroZ is already correct, and
+ *     that invariance is exactly WHY this mount error hid for so long: every
+ *     earlier check looked either at |a| (a magnitude, blind to direction) or at
+ *     gz (the one component a 180 deg yaw cannot change). Negating gyroZ here
+ *     would BREAK the FIX_26-verified CCW -> +gz contract.
+ *   - +Z already maps to +Z (up = up), so accelZ needs no change either.
+ *
+ * ⚠️ The correction lives HERE and NOWHERE ELSE. Do not add a sign flip in
+ * jetson_comm, at pack time, in the DBC, or in the URDF - the DBC contract is
+ * "the TIVA delivers the robot frame", and this function is what MAKES that
+ * true. If the module is ever physically remounted, this block is the single
+ * place to re-derive; delete the negates rather than adding compensating ones.
+ * ===================================================================== */
 static void ImuService_Latch(const MPU6050_DataType *raw)
 {
-    ImuService_Sample.accelX = raw->accelX * ImuService_AccelCorr[0];
-    ImuService_Sample.accelY = raw->accelY * ImuService_AccelCorr[1];
-    ImuService_Sample.accelZ = raw->accelZ * ImuService_AccelCorr[2];
+    /* Scale correction AND the 180 deg mount yaw, together: X and Y negate,
+     * Z does not. The negate wraps the corrected value, so the magnitude is
+     * untouched - |a| still reads ~9.81 and the scale calibration is unaffected. */
+    ImuService_Sample.accelX = -(raw->accelX * ImuService_AccelCorr[0]);
+    ImuService_Sample.accelY = -(raw->accelY * ImuService_AccelCorr[1]);
+    ImuService_Sample.accelZ =  (raw->accelZ * ImuService_AccelCorr[2]);
 
-    ImuService_Sample.gyroX  =  raw->gyroX;
-    ImuService_Sample.gyroY  =  raw->gyroY;
+    /* Same 180 deg yaw on the rate axes: roll/pitch rates flip, yaw rate does not. */
+    ImuService_Sample.gyroX  = -raw->gyroX;
+    ImuService_Sample.gyroY  = -raw->gyroY;
 
     /* Gyro Z is PASS-THROUGH. This is still the single, audited site for the
      * sensor->robot-frame Z transform (matching steering_control's one-transform
@@ -74,7 +123,13 @@ static void ImuService_Latch(const MPU6050_DataType *raw)
      * already-correct sign into a wrong one.
      *
      * If the IMU is ever remounted (chip-down, or rotated onto another axis) this
-     * ONE line is where the sign is re-derived - do not scatter negates downstream. */
+     * ONE line is where the sign is re-derived - do not scatter negates downstream.
+     *
+     * ⚠️⚠️ B13c: THE 180 DEG MOUNT-YAW CORRECTION ABOVE DOES **NOT** APPLY HERE,
+     * and that is not an oversight. Yaw rate is INVARIANT under a rotation about
+     * yaw, so a 180 deg mount yaw leaves gyroZ alone while flipping X and Y.
+     * If you are "making this consistent" with the accelX/accelY negates, STOP -
+     * you would be re-introducing the exact bug FIX_26 removed. */
     ImuService_Sample.gyroZ  =  raw->gyroZ;
 
     ImuService_Sample.temp   =  raw->temp;
@@ -98,6 +153,8 @@ void ImuService_Init(void)
 
     ImuService_Sequence      = 0U;
     ImuService_BackoffCount  = 0U;
+    ImuService_HasSampleFlag = FALSE;
+    ImuService_ResetHold     = 0U;
 
     /* An absent sensor must not hang or trap the caller here: MPU6050_Init
      * returns a status and the service simply starts unhealthy, then retries on
@@ -117,10 +174,38 @@ void ImuService_Update(void)
 
     if (s == MPU6050_OK)
     {
+        /* B13 - THE RECOVERY EDGE, sampled BEFORE Healthy is overwritten.
+         *
+         * "Recovered" means: we were unhealthy, AND we had already produced a
+         * good sample at some earlier point. The second half is what excludes
+         * the first-ever sample after boot - coming up for the first time is
+         * not a re-initialisation, and the host has no calibration to protect
+         * yet. Announcing one there would train the consumer to ignore the bit. */
+        boolean recovered = ((ImuService_Healthy == FALSE) &&
+                             (ImuService_HasSampleFlag != FALSE)) ? TRUE : FALSE;
+
         ImuService_Latch(&raw);
         ImuService_Sequence++;              /* free-running, wraps 255 -> 0 */
-        ImuService_Healthy      = TRUE;
-        ImuService_BackoffCount = 0U;
+        ImuService_Healthy       = TRUE;
+        ImuService_HasSampleFlag = TRUE;
+        ImuService_BackoffCount  = 0U;
+
+        /* RE-ARM on every recovery rather than only when the window is idle, so
+         * a sensor that keeps dropping out keeps the bit asserted throughout
+         * instead of letting it lapse between two closely-spaced faults. */
+        if (recovered != FALSE)
+        {
+            ImuService_ResetHold = IMU_RESET_HOLD_SAMPLES;
+        }
+        else if (ImuService_ResetHold > 0U)
+        {
+            ImuService_ResetHold--;
+        }
+        else
+        {
+            /* steady state - nothing to do */
+        }
+
         return;
     }
 
@@ -149,6 +234,16 @@ void ImuService_Update(void)
 boolean ImuService_IsHealthy(void)
 {
     return ImuService_Healthy;
+}
+
+boolean ImuService_HasSample(void)
+{
+    return ImuService_HasSampleFlag;
+}
+
+boolean ImuService_GetResetFlag(void)
+{
+    return (ImuService_ResetHold > 0U) ? TRUE : FALSE;
 }
 
 void ImuService_GetAccel(float32 *ax, float32 *ay, float32 *az)

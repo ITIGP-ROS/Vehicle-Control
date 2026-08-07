@@ -80,8 +80,10 @@
 #include "app.h"             /* B11: Tier-4 orchestration - App_Start()        */
 #include "app_cfg.h"         /* B11: shared timing/sizing (was defined here)   */
 #include "timer0.h"          /* free-running us tick - the I2C timeout basis    */
-#include "i2c.h"             /* I2C0 (PB2/PB3): the INA226 bus                  */
+#include "i2c.h"             /* I2C0 (PB2/PB3) INA226 + I2C1 (PA6/PA7) MPU6050  */
 #include "battery_service.h" /* hybrid coulomb/voltage fuel gauge over ina226   */
+#include "imu_service.h"     /* B13: MPU6050 service - 0x150/0x160 source       */
+#include "mpu6050.h"         /* MPU6050_GetLastWhoAmI() for the boot diagnostic */
 #include "ina226.h"          /* DIAGNOSTIC ONLY: Ina226_GetLastI2cError() for a
                               * decoded boot message. BatteryService owns the
                               * driver's lifecycle - main never calls
@@ -141,6 +143,7 @@ static void SuperLoop_Run(boolean batteryOk);
 int main(void)
 {
     boolean batteryOk;               /* A3: FALSE disables the two battery slots */
+    boolean imuOk;                   /* B13: FALSE = dead I2C bus, so no tImu    */
 
     /* ---- Init: order matters; violations fail SILENTLY on hardware ---- */
     Port_Init(&Port_Configuration);                 /* 1. mux ALL pins; first    */
@@ -210,6 +213,7 @@ int main(void)
      * without leaving a half-built drive stack behind. ---- */
 
     batteryOk = TRUE;
+    imuOk     = TRUE;
 
     /* 12. ⚠️ MUST precede I2C_Init - every I2C per-command timeout caps on the
      * TIMER0 tick. With TIMER0 stopped the cap never elapses and the first read
@@ -228,17 +232,30 @@ int main(void)
             "# WARN: Timer0_FreeRunning_Init FAILED (expiries=");
         UART_SendInteger(DIAG_UART, (sint32)Timer0_GetInitExpiryCount());
         UART_SendString(DIAG_UART,
-            ") - TIMER0 dead, so I2C has no timeout base; battery telemetry DISABLED\r\n");
+            ") - TIMER0 dead, so I2C has no timeout base; battery AND IMU telemetry DISABLED\r\n");
         batteryOk = FALSE;
+        imuOk     = FALSE;
     }
 
-    if (I2C_Init() != I2C_OK)   /* 13. I2C0, PB2/PB3 - the INA226 bus              */
+    /* 13. ⚠️ I2C_Init() TAKES NO ARGUMENT AND BRINGS UP *BOTH* BUSES - I2C0
+     * (PB2/PB3, the INA226) and I2C1 (PA6/PA7, the MPU6050), per the enable
+     * flags in i2c_cfg.h. This comment used to read "I2C0, PB2/PB3 - the INA226
+     * bus", which was true of the only consumer that existed at the time and
+     * became misleading at B13 when the IMU was wired in.
+     *
+     * ℹ️ Neither bus's pins are muxed by the PORT driver: i2c.c self-muxes them
+     * from its own I2C_Module[] table (PINOUT.md documents this as the one
+     * deliberate exception to "the PORT driver owns pin assignment"). So there
+     * is no PORT_PBCFG.c entry to add for the IMU. */
+    if (I2C_Init() != I2C_OK)
     {
         /* NOT a halt: see the ESSENTIAL vs AUXILIARY note in the file header. A
          * fuel-gauge bus that will not come up must not ground the vehicle. */
         UART_SendString(DIAG_UART,
-            "# WARN: I2C_Init FAILED - battery telemetry DISABLED, 0x210 will not be sent\r\n");
+            "# WARN: I2C_Init FAILED - battery telemetry DISABLED, 0x210 will not be sent, "
+            "IMU DISABLED, 0x150/0x160 will not be sent\r\n");
         batteryOk = FALSE;
+        imuOk     = FALSE;
     }
     else
     {
@@ -276,8 +293,44 @@ int main(void)
         }
     }
 
+    /* ---- 15. B13: the IMU service (MPU6050 on I2C1/PA6-PA7). ----
+     *
+     * Prerequisites are the SAME chain the battery already needed and they have
+     * all just run in order: Port_Init -> Timer0_FreeRunning_Init -> I2C_Init
+     * (imu_service.h states this explicitly; Timer0 must precede I2C or the
+     * first read's cap never elapses and it hangs forever).
+     *
+     * ⚠️ A SENSOR THAT DOES NOT ANSWER HERE IS NOT A FAILURE TO CONTAIN, which
+     * is why this looks different from the battery block above. ImuService_Init
+     * cannot hang and cannot trap on an absent part - it reports unhealthy and
+     * the service retries on its own backoff. So we log what happened and leave
+     * imuOk TRUE: tImu is still created, publishes nothing until a real sample
+     * exists, and picks the sensor up if it appears later. The only thing that
+     * clears imuOk is a dead BUS, handled above, because that leaves nothing to
+     * retry against. */
+    if (imuOk != FALSE)
+    {
+        ImuService_Init();
+
+        if (ImuService_IsHealthy() != FALSE)
+        {
+            UART_SendString(DIAG_UART,
+                "# imu: MPU6050 up on I2C1 (WHO_AM_I ok) - 0x150/0x160 at 50 Hz\r\n");
+        }
+        else
+        {
+            UART_SendString(DIAG_UART,
+                "# WARN: MPU6050 did not answer (who_am_i=0x");
+            UART_SendInteger(DIAG_UART, (sint32)MPU6050_GetLastWhoAmI());
+            UART_SendString(DIAG_UART,
+                ") - tImu WILL RETRY on backoff; 0x150/0x160 stay SILENT until a "
+                "real sample exists (never zeroes)\r\n");
+        }
+    }
+
     UART_SendString(DIAG_UART,
-        "\r\n# SYSTEM MAIN up: CAN 0x100/0x120 in, 0x110/0x130/0x200/0x210 out.\r\n"
+        "\r\n# SYSTEM MAIN up: CAN 0x100/0x120 in, "
+        "0x110/0x130/0x150/0x160/0x200/0x210 out.\r\n"
         "# RX command-loss failsafe ACTIVE: no accepted 0x100/0x120 for ");
     UART_SendInteger(DIAG_UART, (sint32)CMD_TIMEOUT_MS);
     UART_SendString(DIAG_UART,
@@ -297,7 +350,7 @@ int main(void)
      * super-loop under the RTOS - SuperLoop_Run is compiled only for the
      * non-RTOS rollback build below.
      *----------------------------------------------------------------------*/
-    (void)App_Start(batteryOk);
+    (void)App_Start(batteryOk, imuOk);
 
     /* App_Start returns only if vTaskStartScheduler() itself failed, which with
      * static allocation can only mean the Idle task could not be created - a

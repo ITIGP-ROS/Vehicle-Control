@@ -37,6 +37,7 @@
 #include "odo.h"
 #include "encoder.h"
 #include "battery_service.h"
+#include "imu_service.h"
 #include "timer0.h"
 
 /*----------------------------------------------------------------------------
@@ -241,6 +242,82 @@ static void BatteryTask(void *pvParameters)
          * promptly is exactly the right recovery - it keeps the coulomb
          * integral's tick count honest. */
         (void)xTaskDelayUntil(&lastWake, pdMS_TO_TICKS(BATTERY_TASK_PERIOD_MS));
+    }
+}
+
+/*----------------------------------------------------------------------------
+ * B13: tImu. 50 Hz MPU6050 read + the 0x150/0x160 pair. See app_cfg.h for why
+ * this task both SAMPLES and TRANSMITS while tBattery only samples.
+ *
+ * Observability (all plain uint32 - single aligned words, atomic on M4, so the
+ * heartbeat reads them without a guard, same discipline as every other peel):
+ *   im_hwmWords     - stack high-water, [E] -> [M] for the budget.
+ *   im_maxUpdateUs  - worst Update+pack+post seen. This is the number that says
+ *                     whether a 15-command capped I2C burst really costs what
+ *                     the budget estimated (150 us [E]).
+ *   im_txDrops      - times the pair was NOT fully shipped. ★ Expected 0 once
+ *                     the sensor is up; it counts the pre-first-sample gate, an
+ *                     out-of-range/NaN reading, and a refused post. Non-zero
+ *                     with a healthy IMU means the TX queue is under pressure.
+ *--------------------------------------------------------------------------*/
+static StaticTask_t im_tcb;
+static StackType_t  im_stack[IMU_TASK_STACK_WORDS];
+
+static volatile uint32 im_hwmWords    = 0U;
+static volatile uint32 im_minUpdateUs = 0xFFFFFFFFUL;
+static volatile uint32 im_maxUpdateUs = 0U;
+static volatile uint32 im_txDrops     = 0U;
+
+static void ImuTask(void *pvParameters)
+{
+    TickType_t lastWake;
+
+    (void)pvParameters;
+
+    lastWake = AppTask_PhaseAlign(IMU_TASK_PERIOD_MS, IMU_TASK_PHASE_MS);
+
+    for (;;)
+    {
+        uint32 t0 = Timer0_GetTicks();
+        uint32 us;
+
+        /* ★ THE COHERENCY RULE, EXPRESSED AS ADJACENCY: exactly one Update, then
+         * exactly one Send, with nothing between them. JetsonComm_SendImuFrames
+         * reads the service's getters directly, so a second Update here - or a
+         * second Send - would tear the sample the two frames are supposed to
+         * share. Do not add a "send accel now, gyro next cycle" alternation: the
+         * host keeps only the LAST frame of each ID per 30 Hz drain, so split
+         * posts make its sequence-match check fail about half the time and it
+         * discards the ENTIRE sensor read, encoder ticks included. */
+        ImuService_Update();
+
+        if (JetsonComm_SendImuFrames() != E_OK)
+        {
+            if (im_txDrops < 0xFFFFFFFFUL) { im_txDrops++; }
+        }
+
+        /* TIMER0, not DWT - same reasoning as tBattery: already running (it is
+         * the I2C timeout base, so it must be up before any MPU6050 read),
+         * free-running 16 MHz, one tear-free LDR. 16 ticks = 1 us. */
+        /* ⚠️ MIN AND MAX, NOT JUST MAX - the B4 correction applies here too and
+         * matters more for this task than for any other. Four tasks outrank
+         * tImu, so the MAX is a RESPONSE TIME (execution + whatever preempted
+         * it), not a WCET. The MIN is the clean-run figure and is the honest
+         * input to the utilisation sum; the spread between them is the
+         * interference. Reporting only the max would triple-count preemption
+         * that the higher-priority tasks are already charged for. */
+        us = Timer0_ElapsedTicks(t0) / TIMER0_TICKS_PER_US;
+        if (us > im_maxUpdateUs) { im_maxUpdateUs = us; }
+        if (us < im_minUpdateUs) { im_minUpdateUs = us; }
+
+        im_hwmWords = (uint32)uxTaskGetStackHighWaterMark(NULL);
+
+        /* Catch-up form is safe here: unlike tVelocity there is no
+         * fire-early hazard. The MPU6050's own 50 Hz sample register simply
+         * re-reads the same value if we ever came round twice quickly, which
+         * costs a duplicate sequence and nothing else - the PAIR stays matched,
+         * which is the only property the host actually checks. */
+        (void)xTaskDelayUntil(&lastWake, pdMS_TO_TICKS(IMU_TASK_PERIOD_MS));
     }
 }
 
@@ -683,6 +760,7 @@ static StaticTask_t hb_tcb;
 static StackType_t  hb_stack[HEARTBEAT_TASK_STACK_WORDS];
 static volatile uint32 hb_hwmWords = 0U;
 static boolean         hb_batteryOk = FALSE;
+static boolean         hb_imuOk     = FALSE;
 
 static void HeartbeatTask(void *pvParameters)
 {
@@ -740,6 +818,35 @@ static void HeartbeatTask(void *pvParameters)
         else
         {
             UART_SendString(DIAG_UART, " batt=DISABLED");
+        }
+
+        /* B13: the IMU stream, in the form a bench operator needs to answer
+         * "is the Jetson's R-E odometry gate satisfied?" without a candump.
+         * imu_seq ADVANCING is the liveness proof (it only increments on a good
+         * sample); H/S is health vs the merely-held sample; rst is the 0x160
+         * imu_reset bit; drop counts pairs that did not fully ship. */
+        if (hb_imuOk != FALSE)
+        {
+            UART_SendString(DIAG_UART, " imu=");
+            UART_SendString(DIAG_UART,
+                (ImuService_HasSample() == FALSE) ? "NOSAMPLE" :
+                ((ImuService_IsHealthy() != FALSE) ? "H" : "S"));
+            UART_SendString(DIAG_UART, "/seq");
+            UART_SendInteger(DIAG_UART, (sint32)ImuService_GetSequence());
+            UART_SendString(DIAG_UART,
+                (ImuService_GetResetFlag() != FALSE) ? "/rst1" : "/rst0");
+            UART_SendString(DIAG_UART, " im=");
+            UART_SendInteger(DIAG_UART, (sint32)im_hwmWords);
+            UART_SendString(DIAG_UART, "/");
+            UART_SendInteger(DIAG_UART, (sint32)im_minUpdateUs);
+            UART_SendString(DIAG_UART, "-");
+            UART_SendInteger(DIAG_UART, (sint32)im_maxUpdateUs);
+            UART_SendString(DIAG_UART, "us drop=");
+            UART_SendInteger(DIAG_UART, (sint32)im_txDrops);
+        }
+        else
+        {
+            UART_SendString(DIAG_UART, " imu=DISABLED");
         }
 
         /* ---- per-task stacks + the instrumentation each peel added ---- */
@@ -829,10 +936,11 @@ static void HeartbeatTask(void *pvParameters)
         }                                                                     \
     } while (0)
 
-Std_ReturnType App_Start(boolean batteryOk)
+Std_ReturnType App_Start(boolean batteryOk, boolean imuOk)
 {
     hb_batteryOk = batteryOk;
     cl_batteryOk = batteryOk;
+    hb_imuOk     = imuOk;
 
     /* Transport first: this creates the CAN TX queue AND the ISR's TX-complete
      * semaphore, which tCanTx blocks on. */
@@ -855,6 +963,16 @@ Std_ReturnType App_Start(boolean batteryOk)
          * "no task" instead of "skipped slot". */
         APP_CREATE(BatteryTask, "BATT", BATTERY_TASK_STACK_WORDS, BATTERY_TASK_PRIORITY, bt_stack, bt_tcb);
     }
+    if (imuOk != FALSE)
+    {
+        /* ⚠️ GATED ON THE I2C BUS, NOT ON THE SENSOR - and that is the whole
+         * difference from tBattery above. If the bus itself never came up there
+         * is nothing to retry, so no task. But a sensor that merely failed to
+         * answer at boot is NOT a reason to skip: imu_service retries on its own
+         * backoff and starts producing when the part appears, and until then the
+         * HasSample gate keeps it silent rather than publishing zeroes. */
+        APP_CREATE(ImuTask, "IMU", IMU_TASK_STACK_WORDS, IMU_TASK_PRIORITY, im_stack, im_tcb);
+    }
     APP_CREATE(BusHealthTask, "BUSHLTH", BUSHEALTH_TASK_STACK_WORDS, BUSHEALTH_TASK_PRIORITY, bh_stack, bh_tcb);
     APP_CREATE(RosTxTask,     "ROSTX",  ROSTX_TASK_STACK_WORDS,     ROSTX_TASK_PRIORITY,     rt_stack, rt_tcb);
     APP_CREATE(ClusterTxTask, "CLUSTX", CLUSTERTX_TASK_STACK_WORDS, CLUSTERTX_TASK_PRIORITY, cl_stack, cl_tcb);
@@ -862,8 +980,8 @@ Std_ReturnType App_Start(boolean batteryOk)
     APP_CREATE(HeartbeatTask, "HBEAT",  HEARTBEAT_TASK_STACK_WORDS, HEARTBEAT_TASK_PRIORITY, hb_stack, hb_tcb);
 
     UART_SendString(DIAG_UART,
-        "# RTOS: task set up - SAFETY(10) VEL(9) ROSRX(8) BATT(7) CANTX(6) "
-        "BUSHLTH(5) ROSTX(4) CLUSTX(3) ODO(2) HBEAT(1). No super-loop.\r\n");
+        "# RTOS: task set up - SAFETY(11) VEL(10) ROSRX(9) BATT(8) IMU(7) "
+        "CANTX(6) BUSHLTH(5) ROSTX(4) CLUSTX(3) ODO(2) HBEAT(1). No super-loop.\r\n");
 
     vTaskStartScheduler();
 
@@ -875,10 +993,11 @@ Std_ReturnType App_Start(boolean batteryOk)
 
 #else  /* !USE_FREERTOS ------------------------------------------------------ */
 
-Std_ReturnType App_Start(boolean batteryOk)
+Std_ReturnType App_Start(boolean batteryOk, boolean imuOk)
 {
     /* No RTOS in this build: main() runs the legacy super-loop instead. */
     (void)batteryOk;
+    (void)imuOk;
     return E_NOT_OK;
 }
 
