@@ -57,4 +57,15 @@ MPU6050_StatusType MPU6050_ReadRaw(MPU6050_RawDataType *data);
  */
 MPU6050_StatusType MPU6050_ReadData(MPU6050_DataType *data);
 
+/* Bus-recovery observability (see the §3 contract implementation in mpu6050.c).
+ * The PULSE COUNT is the useful one: it is how many SCL clocks the stranded
+ * slave actually needed, so it varies with the bit it was stuck on - 1-4 in
+ * normal operation (recovery fires on the FIRST BUS_STUCK, before the slave has
+ * been abandoned long), versus 4-7 measured on a bus left wedged for minutes.
+ * A count that starts climbing steadily is the signal that the underlying
+ * electrical trigger - which is deliberately NOT fixed, because it was never
+ * isolated - is getting worse. */
+uint8  MPU6050_GetLastRecoverPulses(void);
+uint16 MPU6050_GetRecoverCount(void);
+
 #endif /* MPU6050_H_ */

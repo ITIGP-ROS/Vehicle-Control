@@ -42,12 +42,111 @@ static float32 g_MPU6050_GyroScale = 1.0f;
  *                          Private Helper Functions                           *
  *******************************************************************************/
 
+/*=============================================================================
+ * BUS RECOVERY - the HAL half of i2c.h's §3 contract.
+ *
+ * i2c.h assigns the split explicitly, and this is the side it gives us:
+ *
+ *   "the MCAL owns the mechanics, the HAL owns ALL policy (how many steps,
+ *    how many retries, when to give up)"
+ *   "HAL drives them ONLY on I2C_ERROR_BUS_STUCK (see the integration sketch):
+ *      RecoverBegin(id);
+ *      for (n=0; n<I2C_RECOVER_MAX_STEPS; n++) if (RecoverStep(id)) break;
+ *      status = RecoverEnd(id);"
+ *
+ * 🔴 Until 2026-08-08 NOTHING in the production image implemented this side of
+ * the contract - the primitives were reachable only from test/bringup, and only
+ * for the INA226's bus. The result was measured, not theorised: a BUS_STUCK was
+ * correctly DETECTED (SDA held low mid-burst) and then thrown away, because the
+ * only thing the HAL did was I2C_Reset(), which re-inits the MASTER and cannot
+ * touch a SLAVE holding the line. The IMU stayed wedged across MCU resets and a
+ * reflash. See the DIAG block in docs/MEMORY.md.
+ *
+ * ⚠️ THE GUARD IS PART OF THE CONTRACT, not an optimisation: BUS_STUCK is the
+ * ONLY status allowed in here. i2c.h is explicit that a TIMEOUT means the bus is
+ * already electrically clean, and that "SCL toggling cannot revive a dead slave,
+ * so a TIMEOUT must NEVER be escalated into this recovery path". Callers below
+ * enforce that; do not relax it.
+ *
+ * ⚠️ PER-i2cId, so this cannot disturb the other bus. Every primitive takes the
+ * id and only ever touches that module's own registers and its own two pins
+ * (I2C_Module[]); g_MPU6050_I2cId is I2C1/PA6/PA7. The INA226 on I2C0/PB2/PB3 is
+ * untouched by anything here - the two devices share this MECHANISM, not a bus.
+ *
+ * COST - MEASURED, not estimated, because the estimate was too kind. The
+ * recovery ITSELF is ~185 us (Begin ~15 us + up to 9 steps x 15 us + End ~35 us,
+ * every wait TIMER0-timed). But the whole fault path around it is what tImu
+ * actually pays: the failing command burns its 200 us cap plus a 200 us abort,
+ * then the 14-byte burst is retried in full. On the bench that took tImu's worst
+ * observed Update from 924 us (healthy) to ~2.65 ms on a recovering cycle -
+ * roughly +1.7 ms, NOT +185 us.
+ *
+ * That is affordable here and was verified, not assumed: tImu's period is 20 ms
+ * so a 2.7 ms run is 13 % of its own slot, and although tImu outranks tCanTx a
+ * 7 min soak with 64 recoveries held tx queue peak=2, qfull=0, txfail=0,
+ * txtmo=0, vel_ivl=20/20ms, skip=0, with all six CAN frames at nominal rate.
+ * The HEALTHY path is completely unchanged - none of this executes unless a
+ * command actually fails.
+ *===========================================================================*/
+static uint8 g_MPU6050_LastRecoverPulses = 0U;
+static uint16 g_MPU6050_RecoverCount = 0U;
+
+uint8  MPU6050_GetLastRecoverPulses(void) { return g_MPU6050_LastRecoverPulses; }
+uint16 MPU6050_GetRecoverCount(void)      { return g_MPU6050_RecoverCount; }
+
+static I2C_StatusType MPU6050_RecoverBus(void)
+{
+    uint8 n;
+    I2C_StatusType st;
+
+    I2C_RecoverBegin(g_MPU6050_I2cId);
+    for (n = 0U; n < I2C_RECOVER_MAX_STEPS; n++)
+    {
+        if (I2C_RecoverStep(g_MPU6050_I2cId) != 0U)
+        {
+            break;      /* SDA released - stop early, exactly as i2c.h says */
+        }
+    }
+    st = I2C_RecoverEnd(g_MPU6050_I2cId);
+
+    /* Pulses actually EMITTED, not the loop index: breaking at n means n+1
+     * pulses went out, and running to completion means the full cap. Reporting
+     * the raw n printed "0 pulses" for the common case of the very first pulse
+     * freeing the line, which reads as "recovery did nothing".
+     *
+     * The count is informative, not cosmetic. 1-4 is the healthy signature -
+     * recovery now fires on the FIRST BUS_STUCK, before the slave has been
+     * abandoned long, and sometimes the line is already free by the time we look
+     * (the mode where the MASTER latched BUSBSY, not the slave holding SDA).
+     * The bench probe measured 4-7 on a bus that had been wedged for minutes.
+     * A count drifting upward means the underlying electrical trigger - which is
+     * deliberately NOT fixed here, because it was never isolated - is worsening. */
+    g_MPU6050_LastRecoverPulses = (n < I2C_RECOVER_MAX_STEPS) ? (uint8)(n + 1U) : (uint8)n;
+    g_MPU6050_RecoverCount++;
+
+    return st;
+}
+
+/* TRUE if this transport status is one the contract lets us recover from. */
+static boolean MPU6050_IsRecoverable(I2C_StatusType s)
+{
+    return (boolean)(s == I2C_ERROR_BUS_STUCK);
+}
+
 static MPU6050_StatusType MPU6050_WriteRegister(uint8 regAddr, uint8 data) {
     /* cap_ticks: per-command TIMER0-tick timeout owned by the caller (see i2c.h).
      * REQUIRES Timer0_FreeRunning_Init() to have run - otherwise the wait hangs
      * forever (GPTMTAR static). MPU6050_Init documents this ordering dependency. */
     I2C_StatusType s = I2C_Write(g_MPU6050_I2cId, MPU6050_ADDRESS, regAddr, &data, 1,
                                  MPU6050_I2C_CAP_TICKS);
+
+    if (MPU6050_IsRecoverable(s) != FALSE) {
+        if (MPU6050_RecoverBus() == I2C_OK) {
+            s = I2C_Write(g_MPU6050_I2cId, MPU6050_ADDRESS, regAddr, &data, 1,
+                          MPU6050_I2C_CAP_TICKS);      /* ONE retry, never a loop */
+        }
+    }
+
     if (s != I2C_OK) {
         g_MPU6050_LastI2cError = s;          /* keep the real cause for diagnostics */
         return MPU6050_ERROR_I2C_FAILED;
@@ -58,6 +157,32 @@ static MPU6050_StatusType MPU6050_WriteRegister(uint8 regAddr, uint8 data) {
 static MPU6050_StatusType MPU6050_ReadRegisters(uint8 regAddr, uint8 *data, uint16 length) {
     I2C_StatusType s = I2C_Read(g_MPU6050_I2cId, MPU6050_ADDRESS, regAddr, data, length,
                                 MPU6050_I2C_CAP_TICKS);
+
+    /* 🔴 DIAG defect 1+2, closed HERE and deliberately at this level.
+     *
+     * Every I2C access this HAL makes funnels through these two wrappers - the
+     * WHO_AM_I probe in MPU6050_Init, the six config writes, and ReadRaw's
+     * 14-byte burst. Putting the recovery here therefore closes BOTH measured
+     * defects with one call site:
+     *   - defect 1: a live BUS_STUCK now actually reaches the SCL-toggle
+     *     recovery instead of being flattened and dropped; and
+     *   - defect 2: MPU6050_Init's own WHO_AM_I read can now un-wedge the bus.
+     *     That matters because once ReadRaw marks the device uninitialised,
+     *     ReadData short-circuits on NOT_INITIALIZED and never touches the bus
+     *     again - so Init, driven by imu_service's backoff, is the ONLY path
+     *     left. Before this fix it died at the entry BUSBSY guard having
+     *     attempted nothing, which is what made the wedge permanent.
+     *
+     * ONE retry, not a loop: if a freshly-cleared bus still fails, the fault is
+     * not a stranded slave and pulsing again will not help. The caller's own
+     * backoff owns any further attempt. */
+    if (MPU6050_IsRecoverable(s) != FALSE) {
+        if (MPU6050_RecoverBus() == I2C_OK) {
+            s = I2C_Read(g_MPU6050_I2cId, MPU6050_ADDRESS, regAddr, data, length,
+                         MPU6050_I2C_CAP_TICKS);
+        }
+    }
+
     if (s != I2C_OK) {
         g_MPU6050_LastI2cError = s;          /* keep the real cause for diagnostics */
         return MPU6050_ERROR_I2C_FAILED;

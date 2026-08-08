@@ -38,6 +38,7 @@
 #include "encoder.h"
 #include "battery_service.h"
 #include "imu_service.h"
+#include "mpu6050.h"        /* bus-recovery counters for the heartbeat */
 #include "timer0.h"
 
 /*----------------------------------------------------------------------------
@@ -843,6 +844,18 @@ static void HeartbeatTask(void *pvParameters)
             UART_SendInteger(DIAG_UART, (sint32)im_maxUpdateUs);
             UART_SendString(DIAG_UART, "us drop=");
             UART_SendInteger(DIAG_UART, (sint32)im_txDrops);
+
+            /* Bus-recovery telemetry (2026-08-08 fix). NOT instrumentation -
+             * this is the operator-visible proof that a wedged I2C1 cleared
+             * itself instead of needing an MCU reset. `irec=N/Mp` = N recoveries
+             * since boot, M SCL pulses the last one needed. N rising slowly with
+             * imu=H is the system working as designed; N rising fast, or imu
+             * stuck at S, means the electrical trigger has got worse. */
+            UART_SendString(DIAG_UART, " irec=");
+            UART_SendInteger(DIAG_UART, (sint32)MPU6050_GetRecoverCount());
+            UART_SendString(DIAG_UART, "/");
+            UART_SendInteger(DIAG_UART, (sint32)MPU6050_GetLastRecoverPulses());
+            UART_SendString(DIAG_UART, "p");
         }
         else
         {

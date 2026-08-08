@@ -229,6 +229,13 @@ Flash: [==        ]  21.9% (used 57432 bytes from 262144 bytes)
   tear-safe write order — a power loss mid-save cannot corrupt the stored value.
 - **CAN bus-off recovery** that commands a stop *before* rejoining, so the
   vehicle never resumes on a stale setpoint.
+- **I²C bus-wedge recovery.** A slave that strands mid-transfer holding SDA low
+  cannot be freed by resetting the master — the classic failure where the sensor
+  goes silent until someone power-cycles it. On `BUS_STUCK` the driver now clocks
+  the bus free with up to 9 SCL pulses and retries once, so the IMU **self-clears
+  without an MCU reset**. Measured: 22 such events in a 7-minute soak under host
+  commands and motion, every one recovered in 1–4 pulses, 21,017 good reads after
+  the first fault. The recovery is per-bus, so the INA226 on I²C0 is untouched.
 
 ---
 
@@ -236,7 +243,9 @@ Flash: [==        ]  21.9% (used 57432 bytes from 262144 bytes)
 
 The firmware is complete and verified on the bench: the command path, control
 loop, telemetry, failsafe and persistence have all been exercised on hardware
-against a mock of the real ROS node's CAN behaviour.
+against a mock of the real ROS node's CAN behaviour. The IMU pair `0x150`/`0x160`
+**is produced** (since B13) at 50 Hz with the matched-sequence contract, and the
+I²C1 bus-wedge that used to take it out permanently now self-recovers.
 
 Honestly not yet done:
 
@@ -249,8 +258,17 @@ Honestly not yet done:
   mock reproducing the ROS node's behaviour with deliberately pessimistic jitter;
   the real host's p99 should be confirmed once it is on the bus.
 - **CAN bus-off recovery** is implemented but was never forced during testing.
-- **IMU frames** (`0x150`/`0x160`) are specified in the DBC and expected by the
-  ROS node, but not yet produced by this ECU.
+- **The I²C1 fault TRIGGER is not isolated.** The bus wedge described under safety
+  features auto-recovers, but *what disturbs the bus in the first place* was never
+  pinned down: it fires with zero actuation, yet doubling the host command rate
+  made it stop. Rate and jitter both differed between those runs and which matters
+  is unproven, so it is not guessed at — the firmware is built to **survive** the
+  event rather than prevent it. Watch `irec` in the heartbeat: rising slowly with
+  `imu=H` is the system working; rising fast means the electrical side wants a look.
+- **Per-axis accelerometer scale.** `IMU_ACCEL_SCALE_CORR` is a single scalar for
+  all three axes, so |a| is orientation-dependent by up to ~10 %. Resolving three
+  independent axis gains needs a three-orientation capture. Gyro — and therefore
+  the odometry-critical yaw rate — is unaffected.
 
 ---
 

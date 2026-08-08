@@ -3,7 +3,7 @@
 **Target:** TI TM4C123GH6PM · ARM Cortex-M4F @ **16 MHz** · 32 KB SRAM · 256 KB Flash
 **RTOS:** FreeRTOS v11.1.0 (MIT), GCC/ARM_CM4F port, **preemptive**, **static allocation only**
 **Scheduling:** fixed-priority preemptive, **11 tasks** + idle · 1 kHz tick
-**Last measured:** 2026-08-07 (B13/B13b: tImu + IMU axis check) · tags: **[M] = measured on hardware**, **[E] = estimated / worst-case bound**
+**Last measured:** 2026-08-08 (I2C1 bus-recovery fix; B13/B13b/B13c before it) · tags: **[M] = measured on hardware**, **[E] = estimated / worst-case bound**
 
 > This is the standalone ECU analysis: WCET, CPU load, schedulability, jitter, interrupt latency, and
 > memory budget. Method is stated per metric so every number is reproducible. This is the clean
@@ -36,7 +36,7 @@
 | `tVelocity` | 10 | **20 ms** (hard, QEI) | **60 µs** | [E] | 0.30 % | 2× QEI read + 2× PID (Tustin + deriv filter + anti-windup) + 2× Motor_SetSpeed. **Measured interval 20/20 ms, 0 early fires [M]** |
 | `tRosRx` | 9 | 33.3 ms, burst 2 | 20 µs/frame | [E] | 0.12 % | ISR-semaphore woken; routes steering+velocity per 30 Hz cycle |
 | `tBattery` | 8 | 100 ms | **479.9 µs** | **[M]** | 0.48 % | **MEASURED** — Ina226_ReadAll ~312 µs + ~168 µs SoC estimator |
-| `tImu` | **7** | 20 ms | **927 µs** | **[M]** | **4.64 %** | ✅ **B13** — MPU6050 14-byte burst (15 capped I2C commands) + 2 packs + 2 posts. **Measured 847–927 µs; the 80 µs min–max spread proves this is execution, not interference.** 🔴 6.2× the 150 µs estimate |
+| `tImu` | **7** | 20 ms | **927 µs** | **[M]** | **4.64 %** | ✅ **B13** — MPU6050 14-byte burst (15 capped I2C commands) + 2 packs + 2 posts. **Measured 847–927 µs; the 80 µs min–max spread proves this is execution, not interference.** 🔴 6.2× the 150 µs estimate. ⚠️ On a bus-recovery cycle (2026-08-08 fix) this rises to **~2.65 ms** — 13 % of the 20 ms slot, verified not to disturb the CAN queue |
 | `tCanTx` | 6 | event, 4.5 ms avg | 10 µs CPU | [E] | 0.22 % | pop + Can_Transmit load. The **222 µs on the wire is blocked time, not CPU** |
 | `tRosTx` | 4 | 10 ms (5 ms alt) | ≤ ~1.6 ms | [E] | — | 0x110/0x130; the 0x130 path does 8 ADC conversions, TIMER0-bounded at 200 µs each (see §5) |
 | `tClusterTx` | 3 | 100 ms | 30 µs | [E] | 0.03 % | 0x200 + 0x210 pack + posts |
@@ -107,7 +107,10 @@ a defect, so it isn't mistaken for one.
 
 Every busy-wait in the system is **time-bounded**, never iteration-count-bounded (which is
 compiler/-O-dependent) and never unbounded:
-- **I2C** waits are TIMER0-tick-capped (200 µs cap, ~3.3× a healthy 60 µs command).
+- **I2C** waits are TIMER0-tick-capped (200 µs cap, ~3.3× a healthy 60 µs command). A command that
+  reports `BUS_STUCK` now runs the TIMER0-timed SCL-toggle recovery (≤9 pulses) and is retried once —
+  see §8. Recovery is per-`i2cId` and touches only that module's registers and its own two pins, so
+  **I2C0/INA226 is unaffected** (the two devices share the mechanism, not a bus).
 - **ADC** (`Adc_ReadRaw`) was a 100,000-iteration spin (~500 ms WCET on a dead ADC) → **fixed to a
   TIMER0 time bound at 200 µs**, dropping `ServoFb_ReadRawFiltered` (×8) from ~500 ms to ~1.6 ms.
 - **CAN TX** completion is signalled by an **ISR semaphore** (no `TX_BUSY` spin).
@@ -151,29 +154,52 @@ compiler/-O-dependent) and never unbounded:
 
 ## 8. What is NOT yet measured (recorded honestly, not claimed)
 
-- 🔴 **`tImu` I2C1 ROBUSTNESS — AN OPEN HARDWARE-LEVEL FAULT, NOT A TIMING GAP.** In the B13 session
-  the MPU6050 ran clean for ~300 s (≈15,000 samples, 0 dropped pairs) and then stopped answering
-  permanently: `WHO_AM_I` read back **0x00** and **an MCU reset did not recover it** (a reset does not
-  power-cycle the sensor, so a slave holding SDA low stays held). `imu_service`'s 500 ms backoff
-  re-init retried continuously and never succeeded.
-  **ISOLATED TO HARDWARE.** The harness reports **`i2c=BUS_BUSY, who_am_i=0x00`** — SDA or SCL held
-  **low**. A **full power-cycle did not clear it**, which excludes an I2C slave lockup (a stranded
-  slave releases SDA when powered down). And the **unmodified `mpu6050_bringup` harness — the same
-  binary that ran perfectly earlier in the same session — now fails identically**, so B13 did not
-  cause it. Suspect the PA6/PA7 or 3V3/GND leads / pull-ups / the module itself.
-  ⚠️ **Do not add an I2C bus-recovery routine on this evidence** — 9 SCL pulses free a stranded slave,
-  which the power-cycle result already excludes.
-  **Containment is proven and is what makes this non-blocking for the rest of the system:** the
-  `ImuService_HasSample()` gate meant the firmware published **nothing** rather than zeroes
-  (`imu=NOSAMPLE/seq0`, 0 × 0x150/0x160 on the wire, verified), the task collapsed to **9 µs**/cycle,
-  and the other four frames stayed at exactly 100/100/10/10 Hz.
-  **Next step:** physical — reseat/continuity-check the I2C1 leads or swap the module, then re-run
-  `pio run -e mpu6050_bringup -t upload` (prints `HEALTHY` when the sensor answers). The one B13
-  verification formerly outstanding — the **tilt/rotate axis-sign check** — is ✅ **DONE (B13b,
-  2026-08-07): all six motions PASS, CCW-yaw → +gz confirmed through the production TX path.**
-  ✅ The **180° mount yaw** it surfaced is now **corrected in firmware (B13c)**: `ImuService_Latch`
-  negates accel X/Y + gyro X/Y, gyro Z untouched. Re-verified: nose-up → +ax, left-side-up → +ay,
-  CCW-yaw → +gz unchanged.
+- ✅ **`tImu` I2C1 ROBUSTNESS — DIAGNOSED AND FIXED (2026-08-08).** ⚠️ **This entry previously said
+  "AN OPEN HARDWARE-LEVEL FAULT, NOT A TIMING GAP", declared the fault ISOLATED TO HARDWARE, and
+  warned "Do not add an I2C bus-recovery routine on this evidence." That conclusion was WRONG and is
+  corrected here, because it steered a reader away from what turned out to be the actual fix.**
+  **What was really happening**, measured on hardware with per-command instrumentation and GPIODATA
+  pad-level reads (not inferred):
+  - The initiating fault is `I2C_ERROR_BUS_STUCK` **mid-burst** (receive byte 6 of 14) with **SDA
+    measured LOW at the pad** — the MPU6050 stranded holding the line. Exactly the stranded-slave
+    condition the old text said was "excluded".
+  - `I2C_Reset()` re-inits the **master** and cannot touch a **slave** holding the line, so the wedge
+    survived it — and survived an MCU reset *and* a reflash (first call of the next boot faulted).
+  - 🔴 **The permanence was 100 % SOFTWARE.** The SCL-toggle recovery (`I2C_RecoverBegin/Step/End`)
+    already existed, was correct, and was called by **nobody** in the production image — `i2c.h`
+    documents the contract ("HAL drives them ONLY on `I2C_ERROR_BUS_STUCK`") but no HAL implemented
+    it. Worse, once `MPU6050_ReadRaw` marked the device uninitialised the only `I2C_Reset` call site
+    became unreachable, so the wedge was permanent *by construction*.
+  - ⚠️ **Why the old "power-cycle excludes a stranded slave" inference failed:** it generalised from a
+    single episode that was genuinely also physical (that one was cured by reseating the I2C1 leads).
+    The reproducible wedge is a stranded slave, and **4–7 SCL pulses free it** — measured three times.
+  **The fix (2026-08-08)** wires the existing recovery into the `BUS_STUCK` path per the `i2c.h`
+  contract, gives the fault path a route back to the bus, and makes phase-1 `TIMEOUT` assert the STOP
+  the header always promised (a burst abandoned mid-flight is what strands the slave).
+  **Verified:** 7 min under a 30 Hz host stream **+ real motion** → **22 `BUS_STUCK` events, every one
+  auto-cleared, 64 recoveries needing 1–4 SCL pulses, 21,017 good reads after the first fault, ending
+  HEALTHY with no MCU reset** — the condition that previously wedged permanently within ~5 s.
+  **Cost:** the recovery primitive is ~185 µs, but the whole fault path (200 µs cap + 200 µs abort +
+  a full 14-byte retry) takes tImu's worst cycle from **927 µs → ~2.65 ms**. That is 13 % of tImu's
+  own 20 ms slot; through 64 recoveries the CAN queue held `peak=2 qfull=0 txfail=0 txtmo=0`, all six
+  frames stayed nominal and `vel_ivl=20/20ms skip=0`. **The healthy path is unchanged.**
+  **Observability:** the heartbeat now prints **`irec=N/Mp`** — recoveries since boot / SCL pulses the
+  last one needed. (New field; distinct from `can_recov`, which counts CAN bus-health recoveries.)
+  **Containment still holds and is still worth knowing**, for the case where the sensor is genuinely
+  absent: the `ImuService_HasSample()` gate publishes **nothing** rather than zeroes
+  (`imu=NOSAMPLE/seq0`, 0 × 0x150/0x160 on the wire, verified), the task collapses to **9 µs**/cycle,
+  and the other frames stay at their nominal rates.
+  ✅ The B13b axis-sign check is **DONE** (all six motions PASS, CCW-yaw → +gz through the production
+  TX path), and the **180° mount yaw** it surfaced is **corrected in firmware (B13c)**:
+  `ImuService_Latch` negates accel X/Y + gyro X/Y, gyro Z untouched.
+- 🟡 **The TRIGGER of that bus fault is NOT isolated — deliberately, and the fix does not depend on
+  it.** It fires with **zero actuation** (wedged at 13 s and again at 49 s with rpm=0, steer=0), yet a
+  **60 Hz** command stream produced **0 faults in 120 s** (~6000 cycles). Rate and jitter profile both
+  differed between those runs and which one matters is unproven, so it is not guessed at. The design
+  response is **survive the event, not prevent it** — hence recovery-on-occurrence. **Watch `irec`:**
+  N rising slowly with `imu=H` is the system working as intended; N rising fast, or the pulse count
+  drifting upward, means the electrical trigger is worsening and wants a physical check of the
+  PA6/PA7 leads, pull-ups and module.
 - 🟠 **Per-axis accelerometer scale** — `IMU_ACCEL_SCALE_CORR` is one scalar (1.1054) for all three
   axes, but static holds show Z ~9 % low (needs it) while Y needs none, so |a| is orientation-
   dependent by up to ~10 %. Needs a three-orientation calibration (+Z up, +X up, +Y up) to resolve
@@ -188,5 +214,5 @@ compiler/-O-dependent) and never unbounded:
 
 ---
 
-*Metrics as of 2026-08-07 (B13/B13b/B13c: tImu + the IMU axis check and mount correction).
+*Metrics as of 2026-08-08 (I2C1 bus-recovery fix; B13/B13b/B13c: tImu, the IMU axis check and mount correction).
 Reproduce via the methods in §7. Task ladder: `include/app_priorities.h`.*

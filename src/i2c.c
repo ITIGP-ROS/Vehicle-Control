@@ -244,6 +244,49 @@ static I2C_StatusType I2C_AutoAbort(volatile uint32 *mcs_reg)
 }
 
 /**
+ * @brief  Entry gate for a new transaction: is the bus free, and if not, is it
+ *         merely busy or genuinely WEDGED?
+ *
+ * 🔴 FIX (2026-08-08, DIAG defect 2 enabler). This replaces a bare
+ *     `if (BUSBSY) return I2C_ERROR_BUS_BUSY;`
+ * in both I2C_Read and I2C_Write. That guard was measured to be the thing that
+ * made the IMU wedge PERMANENT: once a slave was left holding SDA low, every
+ * later call - including the backoff MPU6050_Init that was supposed to be the
+ * recovery - was rejected here, having issued nothing and attempted nothing,
+ * forever (the DIAG captured `err=3 ph=0x01` repeating at exactly the 500 ms
+ * backoff cadence, for the whole run).
+ *
+ * The problem was the CLASSIFICATION, not the guard. i2c.h's §3 contract lets
+ * ONLY I2C_ERROR_BUS_STUCK enter the SCL-toggle recovery, so reporting a wedged
+ * bus as the transient-sounding BUS_BUSY put it permanently out of reach of the
+ * one routine that could clear it. This build is single-master, so a BUSBSY that
+ * we cannot clear with a STOP is by definition our own abandoned transaction -
+ * i.e. stuck, not contended.
+ *
+ * @return I2C_OK              bus was already idle - proceed.
+ *         I2C_ERROR_BUS_BUSY  it was busy but a STOP cleared it; transient, the
+ *                             caller retries on its own cadence.
+ *         I2C_ERROR_BUS_STUCK a STOP could NOT clear it - SDA is held. This is
+ *                             the code the HAL is contractually allowed to run
+ *                             SCL-toggle recovery on.
+ */
+static I2C_StatusType I2C_CheckBusFree(volatile uint32 *mcs_reg)
+{
+    if ((*mcs_reg & I2C_MCS_BUSBSY) == 0U)
+    {
+        return I2C_OK;
+    }
+
+    /* Try to release it locally first. I2C_AutoAbort is already TIMER0-capped
+     * (I2C_ABORT_CAP_US), so this cannot become an unbounded spin. */
+    if (I2C_AutoAbort(mcs_reg) == I2C_ERROR_BUS_STUCK)
+    {
+        return I2C_ERROR_BUS_STUCK;
+    }
+    return I2C_ERROR_BUS_BUSY;
+}
+
+/**
  * @brief  Wait for a just-issued I2CMCS command to complete, then decode its
  *         result.
  *
@@ -284,22 +327,39 @@ static I2C_StatusType I2C_WaitForCommandComplete(volatile uint32 *mcs_reg, uint3
     uint32 assertSpins = I2C_BUSY_ASSERT_SPINS;
     uint32 startTicks;
 
-    /* Phase 1: wait for BUSY to assert - see function header comment. LEFT
-     * AS-IS: already a bounded spin-count (I2C_BUSY_ASSERT_SPINS=1000, ~750 us
-     * worst case), never was SysTick-dependent, so it is not part of this
-     * change. */
+    /* Phase 1: wait for BUSY to assert - see function header comment. */
     while (((*mcs_reg & I2C_MCS_BUSY) == 0U) && (assertSpins > 0U))
     {
         assertSpins--;
     }
     if (assertSpins == 0U)
     {
-        /* BUSY never asserted at all - the command was never actually
-         * accepted/started by the hardware (e.g. clock not really enabled).
-         * Report this explicitly rather than falling through to phase 2,
-         * where a never-asserted BUSY would look identical to "already
-         * finished" and this function would wrongly return I2C_OK. */
-        return I2C_ERROR_TIMEOUT;
+        /* BUSY was never OBSERVED. Two very different things produce this and
+         * this spin-count cannot tell them apart:
+         *   (a) the command was never accepted/started (dead/unclocked
+         *       peripheral), or
+         *   (b) ⚠️ THE COMMAND RAN TO COMPLETION BETWEEN TWO OF OUR READS.
+         *       One I2C byte at 400 kHz is ~22.5 us; any interrupt landing just
+         *       after the command write can hide the whole BUSY pulse.
+         *
+         * 🔴 FIX (2026-08-08, DIAG defect 3). This used to `return
+         * I2C_ERROR_TIMEOUT` right here, having issued NO STOP - which
+         * contradicted this module's own documented contract in i2c.h:
+         *
+         *     "I2C_ERROR_TIMEOUT means auto-abort already asserted STOP and
+         *      BUSBSY cleared: the bus is electrically CLEAN."
+         *
+         * It was not clean. In case (b) the caller then abandoned a burst
+         * mid-transaction with the bus still held, leaving the MPU6050 stranded
+         * holding SDA low - the measured origin of the permanent IMU wedge.
+         *
+         * Now we run the SAME auto-abort as the phase-2 path, so the promise the
+         * header makes is actually kept: STOP is asserted, and the return code
+         * tells the truth about whether the bus came back
+         * (I2C_ERROR_TIMEOUT = clean) or did not (I2C_ERROR_BUS_STUCK = SDA
+         * still held, HAL must run SCL recovery). In case (a) the STOP is
+         * harmless; in case (b) it correctly terminates the burst. */
+        return I2C_AutoAbort(mcs_reg);
     }
 
     /* Phase 2: wait for BUSY to clear - real transaction complete, bounded by
@@ -460,10 +520,11 @@ I2C_StatusType I2C_Write(I2C_IdType i2cId, uint8 slaveAddr, uint8 regAddr, const
 
     mod = &I2C_Module[i2cId];
 
-    /* Wait if bus is busy (a DIFFERENT master or a leftover STOP-less
-     * transaction is on the bus right now - distinct from the per-command
-     * BUSY check done after each I2CMCS write below). */
-    if ((*(mod->mcs) & I2C_MCS_BUSBSY) != 0U) { return I2C_ERROR_BUS_BUSY; }
+    /* Bus free? A leftover STOP-less transaction of our own is the case that
+     * matters here - see I2C_CheckBusFree for why the distinction between
+     * "busy" and "stuck" is load-bearing. */
+    status = I2C_CheckBusFree(mod->mcs);
+    if (status != I2C_OK) { return status; }
 
     /* I2CMSA = (7-bit slave address << 1) | R/S.  bit0 = R/S (0=write,
      * 1=read), bits[7:1] = the 7-bit address - datasheet "I2C Master Slave
@@ -518,7 +579,8 @@ I2C_StatusType I2C_Read(I2C_IdType i2cId, uint8 slaveAddr, uint8 regAddr, uint8 
 
     mod = &I2C_Module[i2cId];
 
-    if ((*(mod->mcs) & I2C_MCS_BUSBSY) != 0U) { return I2C_ERROR_BUS_BUSY; }
+    status = I2C_CheckBusFree(mod->mcs);
+    if (status != I2C_OK) { return status; }
 
     /* --- Address phase: write the register pointer --- */
     *(mod->msa) = ((uint32)slaveAddr << 1) | 0UL;   /* R/S=0 (write), see I2C_Write comment above */
