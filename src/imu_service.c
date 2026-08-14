@@ -23,6 +23,13 @@ static const MPU6050_ConfigType ImuService_Config = {
  * part needs one and how to re-measure it). */
 static const float32 ImuService_AccelCorr[3] = IMU_ACCEL_SCALE_CORR;
 
+/* Per-axis gyroscope scale correction (2026-08-14). Same story as the accel one
+ * directly above - this part's real LSB/dps is not the nominal 131 - and it is
+ * applied at the SAME single site, ImuService_Latch. See imu_service_cfg.h for
+ * the measured figure and, more importantly, for how to re-measure it (with
+ * gravity as the reference; a hand-turned "360 degrees" is NOT a usable one). */
+static const float32 ImuService_GyroCorr[3] = IMU_GYRO_SCALE_CORR;
+
 /* Latest GOOD sample, in engineering units, already corrected and already
  * sign-conventioned. Held across a fault so consumers get stale-but-valid data
  * rather than garbage. */
@@ -105,9 +112,12 @@ static void ImuService_Latch(const MPU6050_DataType *raw)
     ImuService_Sample.accelY = -(raw->accelY * ImuService_AccelCorr[1]);
     ImuService_Sample.accelZ =  (raw->accelZ * ImuService_AccelCorr[2]);
 
-    /* Same 180 deg yaw on the rate axes: roll/pitch rates flip, yaw rate does not. */
-    ImuService_Sample.gyroX  = -raw->gyroX;
-    ImuService_Sample.gyroY  = -raw->gyroY;
+    /* Same 180 deg yaw on the rate axes: roll/pitch rates flip, yaw rate does not.
+     * The 2026-08-14 gyro scale correction rides along here, exactly as the accel
+     * correction does above: a MULTIPLY commutes with the negate, so the sign
+     * convention below is completely unaffected by it. */
+    ImuService_Sample.gyroX  = -(raw->gyroX * ImuService_GyroCorr[0]);
+    ImuService_Sample.gyroY  = -(raw->gyroY * ImuService_GyroCorr[1]);
 
     /* Gyro Z is PASS-THROUGH. This is still the single, audited site for the
      * sensor->robot-frame Z transform (matching steering_control's one-transform
@@ -129,8 +139,15 @@ static void ImuService_Latch(const MPU6050_DataType *raw)
      * and that is not an oversight. Yaw rate is INVARIANT under a rotation about
      * yaw, so a 180 deg mount yaw leaves gyroZ alone while flipping X and Y.
      * If you are "making this consistent" with the accelX/accelY negates, STOP -
-     * you would be re-introducing the exact bug FIX_26 removed. */
-    ImuService_Sample.gyroZ  =  raw->gyroZ;
+     * you would be re-introducing the exact bug FIX_26 removed.
+     *
+     * ⚠️ 2026-08-14: the gyro SCALE correction is applied here too, and it does
+     * NOT disturb any of the above. It is a positive multiplier - it changes the
+     * MAGNITUDE only, never the sign - so the FIX_26 "CCW from top yields +gz"
+     * contract still holds exactly as verified. This line remains the identity
+     * for the mount TRANSFORM; the multiply is a per-part gain fix, a separate
+     * concern that just happens to live at the same single site. */
+    ImuService_Sample.gyroZ  =  raw->gyroZ * ImuService_GyroCorr[2];
 
     ImuService_Sample.temp   =  raw->temp;
 }

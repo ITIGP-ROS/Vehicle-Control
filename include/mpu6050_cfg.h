@@ -57,8 +57,41 @@
  *     0x72  MPU9255
  *     0x98  some far-eastern MPU6050 clones
  * e.g. to accept a 0x70 clone:  #define MPU6050_WHO_AM_I_ACCEPTED_IDS { 0x68, 0x70 }
+ *
+ * 2026-08-14: 0x70 ADDED. The IMU module was physically swapped and the new
+ * part returns WHO_AM_I = 0x70 (MPU6500-family / clone silicon on an otherwise
+ * MPU6050-pin-compatible breakout). MEASURED, not guessed: with the strict
+ * { 0x68 } list the bringup harness read whoami=0x70 with i2c status I2C_OK -
+ * i.e. the part answers cleanly at 0x68 and was rejected purely on identity, so
+ * MPU6050_Init returned NOT_FOUND, ImuService never got a sample, and the
+ * HasSample gate held 0x150/0x160 silent (0 frames on CAN).
+ *
+ * ⚠️ WHAT THIS ONE LINE DOES *NOT* PROMISE - the part is register-compatible
+ * for everything this driver touches, but not identical:
+ *   - the REGISTER MAP is compatible and that much IS verified on this part: the
+ *     burst from 0x3B, PWR_MGMT_1 0x6B, CONFIG 0x1A, GYRO_CONFIG 0x1B,
+ *     ACCEL_CONFIG 0x1C and SMPLRT_DIV 0x19 all took effect - data flows at the
+ *     configured 50 Hz and the gyro rest bias is sane (~0.03 rad/s).
+ *   - ⚠️ THE ACCEL GAIN IS NOT. Measured 2026-08-14 over 299 CAN samples at
+ *     rest, this part's raw output is 1.1277 g where it should read 1.000 g,
+ *     i.e. an effective ~18475 LSB/g against the 16384 this driver assumes
+ *     (+12.7 %). The driver's scale constant is NOT changed for that - the
+ *     per-part gain error is what IMU_ACCEL_SCALE_CORR (imu_service_cfg.h)
+ *     exists to absorb, and it still holds the OLD module's factor. See the
+ *     2026-08-14 block in docs/MEMORY.md before trusting 0x150 accel.
+ *   - the gyro's 131 LSB/dps is UNVERIFIED here: a rest reading constrains the
+ *     OFFSET, not the SCALE. Verifying it needs a known rotation.
+ *   - the temperature formula differs on genuine MPU6500 silicon
+ *     (/333.87 + 21.0 vs the /340 + 36.53 in mpu6050.c). Harmless HERE only
+ *     because temp is not published on 0x150/0x160 - do not start trusting
+ *     MPU6050_DataType.temp on this board without re-deriving it.
+ *   - the ACCEL digital LPF on a 6500 lives in ACCEL_CONFIG2 (0x1D), which this
+ *     driver never writes. MPU6050_DLPF_CFG_VALUE (CONFIG 0x1A) still sets the
+ *     GYRO bandwidth and the 1 kHz base the divider needs, so the 50 Hz output
+ *     rate is unaffected, but accel bandwidth sits at the part's reset default
+ *     rather than the ~44 Hz this cfg intends.
  */
-#define MPU6050_WHO_AM_I_ACCEPTED_IDS   { 0x68 }
+#define MPU6050_WHO_AM_I_ACCEPTED_IDS   { 0x68, 0x70 }
 
 /*******************************************************************************
  *                          Filtering and sample rate                          *
