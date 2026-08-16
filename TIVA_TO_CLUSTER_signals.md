@@ -3,6 +3,12 @@
 Everything the Tiva sends the cluster, with real value ranges. **Tiva → Cluster only.**
 Bus: CAN0, 500 kbps, standard 11-bit IDs. DBC: `can_ws/dbc/robot.dbc` (v2, 2026-08-05).
 
+> ### 🔴 `0x130` steering changed scale on 2026-08-16 and the firmware is already flashed
+> If your display was scaled before that date it is misreading **now** — it clips 18 % on
+> the left and under-reads 6 % on the right. This document is already updated; what to
+> actually change is in **[`CLUSTER_NOTICE_steering_scale_20260816.md`](CLUSTER_NOTICE_steering_scale_20260816.md)**.
+> Frame layout, units and sign convention are unchanged, and `0x200` / `0x210` are unaffected.
+
 ---
 
 ## 0x200 VehicleStatus — 10 Hz
