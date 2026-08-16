@@ -50,7 +50,13 @@
 
 /* ADC counts at wheels-straight (angle == 0). Mean of three CENTER visits
  * (2001.5 / 1965.1 / 2005.8) - the spread is the backlash band above. */
-#define SERVO_FB_POT_CENTER             (1991)
+/* RE-MEASURED 2026-08-16. Was 1991 (set 2026-07-30). The pot reads ~1950 with the
+ * wheels at the commanded-straight position, and this is NOT recent drift or a
+ * consequence of anyone hand-turning the linkage: the ground-drive CAN capture from
+ * BEFORE any hand-turning shows 0x130 = +0.00692 rad while 0x120 commanded exactly
+ * 0.00000 across 795 frames, i.e. pot 1950. Re-checked after: 1942 under load,
+ * 1956 at rest. */
+#define SERVO_FB_POT_CENTER             (1950)
 
 /* Radians per ADC count. Derived from the RIGHT endpoint (largest count span =
  * best resolution), which also makes the right side exact:
@@ -60,7 +66,34 @@
  * The LEFT check is BELOW the CAD 17.4 deg on purpose - that is the achieved
  * left travel, not an error in this scale (see DESIGN vs ACHIEVED above).
  * Negative because higher counts = RIGHT = negative angle. */
-#define SERVO_FB_SCALE_RAD_PER_COUNT    (-0.00016882f)
+/*******************************************************************************
+ * RE-CALIBRATED 2026-08-16 - AND SPLIT PER SIDE. Read servo_cfg.h first.       *
+ *                                                                             *
+ * The old single -0.00016882 was derived from the CAD design angle (0.3037 rad *
+ * assumed at the right endpoint), never from a wheel measurement. It was wrong *
+ * by ~2.3x, and because the COMMAND constants were wrong by the same factor,   *
+ * the reported angle agreed with the setpoint (ratio 1.02-1.11) while both     *
+ * disagreed with the physical world. Two errors cancelling in the report.      *
+ *                                                                             *
+ * ONE CONSTANT IS NOT ENOUGH. The pot sits on the servo horn / linkage, not on *
+ * the road wheel, and the linkage is measurably asymmetric, so counts-per-      *
+ * radian differs by side. Measured, pairing pot counts with true wheel angles  *
+ * derived from tape-measured circle diameters (centre = 1950):                 *
+ *                                                                             *
+ *     LEFT   pot 1051 <-> true +0.34731    scale -0.00038633                   *
+ *     RIGHT  pot 2354 <-> true -0.13365    slope -0.00033082                   *
+ *            pot 2601 <-> true -0.21072    slope -0.00032369                   *
+ *            pot 2841 <-> true -0.28605    slope -0.00032104                   *
+ *            => least squares -0.00032301                                      *
+ *                                                                             *
+ * Asymmetry 1.196 - which independently matches the 1.210 asymmetry measured   *
+ * on the COMMAND side from circle diameters alone. Two separate methods, same  *
+ * linkage, same answer.                                                        *
+ *                                                                             *
+ * Sign convention unchanged: higher count = RIGHT = negative angle (REP-103).  *
+ *******************************************************************************/
+#define SERVO_FB_SCALE_LEFT_RAD_PER_COUNT   (-0.00038633f)  /* count < CENTER */
+#define SERVO_FB_SCALE_RIGHT_RAD_PER_COUNT  (-0.00032301f)  /* count > CENTER */
 
 /* OPTIONAL coarse pot-fault window (NOT travel limits, NOT used to clamp the
  * angle). Normal travel is now 557..3790, so the previous [900, 4000] window

@@ -49,7 +49,7 @@ as gauges, not lab values.
 
 | Signal | Bits | Type | Scale | Unit | Real range you'll see | Notes |
 |---|---|---|---|---|---|---|
-| `steeringAngle` | 0–31 | float | — | **rad** | **−0.304 … +0.242** | **+ = LEFT** (REP-103). This is the real travel: ~ **−17.4° … +13.9°**, NOT a full wheel turn. |
+| `steeringAngle` | 0–31 | float | — | **rad** | **−0.286 … +0.286** | **+ = LEFT** (REP-103). This is the real travel: ~ **−16.4° … +16.4°**, NOT a full wheel turn. **Recalibrated 2026-08-16 — see the warning below.** |
 | `at_target` | b32 | bit | — | — | 0/1 | reached the (clamped) setpoint |
 | `pot_fault` | b33 | bit | — | — | 0/1 | pot reading bad → **grey out the steering display** when set |
 | `out_of_range` | b34 | bit | — | — | 0/1 | request exceeded travel, was clamped |
@@ -60,17 +60,35 @@ as gauges, not lab values.
   setpoint". `at_target` + `out_of_range` together = the request was beyond travel, clamped, and that
   limit was reached — not "we're where you asked".
 - When `pot_fault` is set, `at_target` and `saturated` are suppressed (untrustworthy) — grey out.
-- Rendering the wheel icon: map the ±angle to your icon rotation. Expect small travel (±~14°), and
+- Rendering the wheel icon: map the ±angle to your icon rotation. Expect small travel (±~16°), and
   **left-endpoint angle is noisier than right** (mechanical, known) — light smoothing on the icon helps.
+
+> ### ⚠️ `steeringAngle` WAS RECALIBRATED ON 2026-08-16 — re-check your gauge scaling
+> **If your display was scaled against the old range, it now under-reads.**
+>
+> The old figures (−0.3037 … +0.2421) came from a CAD design angle and from the steering
+> potentiometer. **Neither had ever been checked against the road wheels.** The pot sits
+> upstream, on the servo horn / linkage, so pot travel and wheel angle differ by the linkage
+> ratio — and that ratio was never accounted for. Measured against the wheels by driving
+> circles and tape-measuring them, `0x130` was under-reporting by **2.31× on the left** and
+> **1.91× on the right**.
+>
+> **`0x130` now carries the true wheel angle.** Nothing about the frame layout, units, sign
+> convention or status bits changed — only the numbers are now correct. The endpoints are
+> also symmetric now, where they used to be asymmetric.
+>
+> Small transient overshoot slightly past ±0.286 is normal (the clamp bounds the *command*,
+> and the pot reports where the wheels actually are). Treat `out_of_range` / `saturated` as
+> the authority on "at the limit", not the raw magnitude.
 
 ---
 
 ## Quick reference — steering angle endpoints
-| | rad | degrees |
-|---|---|---|
-| full LEFT | +0.2421 | +13.9° |
-| centre | 0.0 | 0° |
-| full RIGHT | −0.3037 | −17.4° |
+| | rad | degrees | |
+|---|---|---|---|
+| full LEFT | **+0.286** | **+16.4°** | was +0.2421 / +13.9° before 2026-08-16 |
+| centre | 0.0 | 0° | |
+| full RIGHT | **−0.286** | **−16.4°** | was −0.3037 / −17.4° before 2026-08-16 |
 
 ---
 

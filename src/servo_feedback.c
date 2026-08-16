@@ -34,9 +34,24 @@ uint16 ServoFb_ReadRawFiltered(void)
 float32 ServoFb_CountToAngleRad(uint16 raw_count)
 {
     /* angle = (count - center) * scale ; signed difference so left (< center)
-     * gives + and right (> center) gives - (REP-103). NOT clamped. */
-    return (float32)((sint32)raw_count - SERVO_FB_POT_CENTER)
-           * SERVO_FB_SCALE_RAD_PER_COUNT;
+     * gives + and right (> center) gives - (REP-103). NOT clamped.
+     *
+     * PER-SIDE SCALE (2026-08-16): the pot is on the servo horn / linkage, not on
+     * the road wheel, and that linkage is asymmetric - counts-per-radian differs
+     * by 1.196 between sides (measured; see servo_feedback_cfg.h). A single scale
+     * is therefore ~10 % wrong on both sides at once. This mirrors the two-branch
+     * split servo.c already uses on the command side, and for the same reason:
+     * DO NOT collapse these branches back into one multiply. */
+    const sint32 delta = (sint32)raw_count - SERVO_FB_POT_CENTER;
+
+    if (delta <= 0)
+    {
+        /* count at or below centre -> LEFT (positive angle) */
+        return (float32)delta * SERVO_FB_SCALE_LEFT_RAD_PER_COUNT;
+    }
+
+    /* count above centre -> RIGHT (negative angle) */
+    return (float32)delta * SERVO_FB_SCALE_RIGHT_RAD_PER_COUNT;
 }
 
 float32 ServoFb_ReadAngleRad(void)

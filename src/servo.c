@@ -25,7 +25,8 @@ static float32 Servo_CommandedAngleRad = 0.0f;
 
 /**
  * @brief  Map a steering angle (rad) to a servo pulse width (us), clamped to the
- *         travel endpoints. CALIBRATED asymmetric map (re-measured 2026-07-30):
+ *         travel endpoints. CALIBRATED asymmetric map (re-measured 2026-08-16
+ *         against the ROAD WHEELS, superseding the 2026-07-30 pot/CAD figures):
  *         each side uses its own linear scale that hits its endpoint exactly
  *         (servo_cfg.h / servo_feedback_cfg.h). Native sign convention is
  *         UNCHANGED: +angle -> RIGHT (higher us), -angle -> LEFT (lower us).
@@ -33,11 +34,14 @@ static float32 Servo_CommandedAngleRad = 0.0f;
  *         command lands on the LEFT branch.
  *
  *         !! DO NOT MERGE THE TWO BRANCHES. They are asymmetric in BOTH terms:
- *              LEFT : angle 0.2421 rad over an 850us span (1450 -> 600)
- *              RIGHT: angle 0.3037 rad over a 1050us span (1450 -> 2500)
- *         They look mergeable whenever the two angle constants happen to match,
- *         but the pulse spans never have. Collapsing them mis-scales one side by
- *         ~24%. Each branch reaches its endpoint exactly when the commanded angle
+ *              LEFT : angle 0.5595 rad over an 850us span (1450 -> 600)
+ *              RIGHT: angle 0.5800 rad over a 1050us span (1450 -> 2500)
+ *         !! THE TEMPTATION IS NOW WORSE, NOT BETTER. After the 2026-08-16
+ *         calibration the two ANGLE constants sit within 3.7% of each other -
+ *         they used to differ by 25% - so the branches now read as trivially
+ *         mergeable. They are not: the PULSE SPANS still differ by 24% (850 vs
+ *         1050us), and the span is the term that mis-scales a side if collapsed.
+ *         Each branch reaches its endpoint exactly when the commanded angle
  *         equals that side's magnitude - which is also why SC_LIMIT_LEFT/RIGHT_RAD
  *         in steering_control.c must mirror these two constants.
  */

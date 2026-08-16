@@ -90,8 +90,59 @@
  * Servo_AngleRadToPulseUs into one. The angles differ (0.2421 vs 0.3037) AND the
  * pulse spans differ (850us left vs 1050us right). Merging the branches would
  * mis-scale a side badly. The two-branch structure is required. */
-#define SERVO_MAX_ANGLE_LEFT_RAD        (0.2421f)  /* ATTAINABLE at full LEFT (600us), measured */
-#define SERVO_MAX_ANGLE_RIGHT_RAD       (0.3037f)  /* CAD design at full RIGHT (2500us), exact  */
+/*******************************************************************************
+ * RE-CALIBRATED 2026-08-16 FROM MEASURED VEHICLE BEHAVIOUR - READ THIS FIRST  *
+ *                                                                            *
+ * The previous values (0.2421 / 0.3037) were NOT wheel-angle measurements.    *
+ * 0.3037 rad was the CAD DESIGN figure and 0.2421 was derived from it via the *
+ * pot; neither was ever checked against the road wheels. They were wrong by   *
+ * ~2.3x (left) and ~1.9x (right), so the vehicle turned that much harder than *
+ * commanded: asking for a 1.05 m radius produced 0.42 m.                      *
+ *                                                                            *
+ * ROOT CAUSE: the pot is NOT on the road wheel - it is upstream on the servo  *
+ * horn / linkage - so pot travel and wheel angle differ by the linkage ratio, *
+ * which nobody had accounted for.                                            *
+ *                                                                            *
+ * HOW THESE WERE MEASURED (repeatable, no protractor):                        *
+ *   drive a steady circle at a known commanded angle, tape-measure the traced *
+ *   circle DIAMETER (centreline), then delta_true = atan(L / (dia/2)),        *
+ *   L = 0.23529 m. Least squares through the origin, per side:                *
+ *                                                                            *
+ *     LEFT   cmd 0.15000 -> dia 1.30 m -> true 0.34731   k = 2.315            *
+ *            cmd 0.11734 -> dia 1.70 m -> true 0.27005   k = 2.301            *
+ *            cmd 0.08225 -> dia 2.44 m -> true 0.19052   k = 2.316            *
+ *            => k_left  = 2.3111, residuals +/-0.065 deg, offset -0.018 deg   *
+ *                                                                            *
+ *     RIGHT  cmd 0.15000 -> dia 1.60 m -> true 0.28605   k = 1.907            *
+ *            cmd 0.11000 -> dia 2.20 m -> true 0.21072   k = 1.916            *
+ *            cmd 0.07000 -> dia 3.50 m -> true 0.13365   k = 1.909            *
+ *            => k_right = 1.9099, residuals +/-0.036 deg, offset +0.034 deg   *
+ *                                                                            *
+ *   Both sides are LINEAR THROUGH THE ORIGIN to better than 0.07 deg. One     *
+ *   constant per side is sufficient; no lookup table is needed.              *
+ *                                                                            *
+ * THE SIDES REALLY DO DIFFER (k_left/k_right = 1.210). Independently          *
+ * corroborated: the feedback pot gives the same asymmetry, 1.196, from a      *
+ * completely separate fit. The linkage is measurably non-Ackermann and        *
+ * asymmetric (outer wheel under-turned 4.1 deg at left lock, 12.1 deg at      *
+ * right lock, hand-measured at the stops).                                    *
+ *                                                                            *
+ * MEASURE IN THE LINEAR REGION ONLY (|cmd| <= 0.15 old units). Near the pulse *
+ * endpoints the servo SATURATES - it runs out of authority before the linkage *
+ * does, exactly as the note above says. Evidence: commanding 0.21991 and      *
+ * 0.2421 produced the SAME 0.95 m circle. Endpoint measurements also vary     *
+ * with battery voltage (0.84 m at 11.5 V vs 0.95 m at 11.4 V for one command) *
+ * while linear-region measurements do not (k within 0.7 % across 10.6-11.3 V).*
+ * That is why these constants come from the linear region and NOT from the    *
+ * travel limits.                                                             *
+ *                                                                            *
+ * These constants are the SCALE of the angle->pulse map. The full-travel      *
+ * angles they name are therefore not all physically reachable - the CLAMPS in *
+ * steering_control.c (SC_LIMIT_*) are what keep commands inside the verified  *
+ * range. Change the two together, never one alone.                            *
+ *******************************************************************************/
+#define SERVO_MAX_ANGLE_LEFT_RAD        (0.5595f)  /* = 0.2421 * 2.3111, measured 2026-08-16 */
+#define SERVO_MAX_ANGLE_RIGHT_RAD       (0.5800f)  /* = 0.3037 * 1.9099, measured 2026-08-16 */
 
 /* Rejection bound for the HAL's non-finite guard (R3-1, servo.c). Far outside any
  * real steering angle, so only genuinely non-finite / absurd inputs are refused;

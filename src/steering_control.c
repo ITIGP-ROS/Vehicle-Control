@@ -41,8 +41,34 @@
  *  (0.0068 rad) and the ~9.5-count endpoint noise (0.0016 rad) keeps err at
  *  ~0.0084 rad, well inside the 0.02 deadband.
  * ==========================================================================*/
-#define SC_LIMIT_LEFT_RAD     ( 0.2421f)
-#define SC_LIMIT_RIGHT_RAD    (-0.3037f)
+/* RE-DERIVED 2026-08-16 with the steering re-calibration (servo_cfg.h).
+ *
+ * These are now in TRUE wheel-angle radians, like SERVO_MAX_ANGLE_*_RAD. They are
+ * deliberately SMALLER than those constants, and that is not an inconsistency:
+ *
+ *   SERVO_MAX_ANGLE_*  = the SCALE of the angle->pulse map (set from the linear region)
+ *   SC_LIMIT_*         = the largest angle we will actually COMMAND
+ *
+ * The servo saturates before the linkage does, so the angles the map names at the
+ * pulse endpoints (0.5595 / 0.5800) are not reliably reachable. Measured: commanding
+ * old-0.21991 and old-0.2421 both produced the same 0.95 m circle, i.e. no further
+ * travel, and endpoint travel also drifts with battery voltage. Inside the linear
+ * region the response is repeatable to better than 0.07 deg.
+ *
+ * 0.286 rad is the largest angle VERIFIED linear on BOTH sides (right side measured
+ * to 0.28605, left to 0.34731). Chosen symmetric so the vehicle behaves the same in
+ * both directions and planners get one number:
+ *
+ *     minimum turning radius = L / tan(0.286) = 0.23529 / 0.29388 = 0.80 m
+ *
+ * That is still tighter than the 0.96-1.00 m the Nav2 configs currently assume, so
+ * nothing is lost operationally by clamping here.
+ *
+ * TO EXTEND: measure circles between cmd 0.15 and 0.22 (old units) to find where
+ * saturation actually begins; the left side is known-linear to at least 0.347. Do
+ * not raise these without that measurement. */
+#define SC_LIMIT_LEFT_RAD     ( 0.286f)
+#define SC_LIMIT_RIGHT_RAD    (-0.286f)
 
 /* S10-4 (REVIEW 10) - UNGUARDED BY CHOICE, not by impossibility. See below.
  *

@@ -37,7 +37,9 @@ uint16 ServoFb_ReadRawFiltered(void);
 
 /**
  * @brief  Pure conversion: filtered ADC count -> steering angle (rad, REP-103).
- *         angle = (count - SERVO_FB_POT_CENTER) * SERVO_FB_SCALE_RAD_PER_COUNT.
+ *         angle = (count - SERVO_FB_POT_CENTER) * SERVO_FB_SCALE_{LEFT,RIGHT}_RAD_PER_COUNT,
+ *         the scale chosen by which side of centre the count falls (the linkage is
+ *         asymmetric; see servo_feedback_cfg.h, re-calibrated 2026-08-16).
  *         Exposed so a caller can convert a count it already has (e.g. the
  *         bring-up stream) without a second ADC read.
  * @param  raw_count: a filtered ADC count (0..4095).
