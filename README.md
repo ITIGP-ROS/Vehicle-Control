@@ -200,8 +200,8 @@ There is **one** environment, `lptm4c123gh6pm`, so those commands need no `-e`.
 > adapter** — *not* the ICDI virtual COM port (UART0/PA0-PA1 is disabled).
 
 ```
-RAM:   [====      ]  35.1% (used 11500 bytes from 32768 bytes)
-Flash: [==        ]  21.9% (used 57432 bytes from 262144 bytes)
+RAM:   [====      ]  37.8% (used 12400 bytes from 32768 bytes)
+Flash: [==        ]  22.6% (used 59260 bytes from 262144 bytes)
 ```
 
 ---

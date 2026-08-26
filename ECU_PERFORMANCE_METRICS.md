@@ -16,9 +16,9 @@
 
 | Metric | Value | Verdict |
 |---|---|---|
-| **Total CPU utilization `U`** | **≈ 8.6 %** (incl. 2.0 % kernel tick) | 🟢 ~91 % headroom |
+| **Total CPU utilization `U`** | **≈ 12.3 % measured** / ≈ 19.8 % worst case (incl. 2.0 % kernel tick) | 🟢 ~88 % headroom · ⚠️ was published as 8.6 %, see §7c.1 |
 | **Schedulability (RM bound, n=11)** | `U` 8.6 % vs bound **71.4 %** | 🟢 passes ~8× |
-| **Schedulability (RTA, exact, `tVelocity`)** | worst-case response **≈ 95 µs** vs a **20,000 µs** deadline | 🟢 ~210× margin |
+| **Schedulability (RTA, exact, `tVelocity`)** | worst-case response **≈ 290 µs [M]** vs a **20,000 µs** deadline | 🟢 ~69× margin · ⚠️ was published as 95 µs, see §7c.2 |
 | **Worst-case interrupt latency** | **≈ 4 µs** (masked) / **0.75 µs** (above syscall priority) | 🟢 |
 | **RAM usage** | **37.8 %** of 32 KB (B13 tImu adds ~0.9 KB) | 🟢 |
 | **Flash usage** | ~59 KB of 256 KB (kernel adds ~11 KB) | 🟢 |
@@ -54,7 +54,7 @@
 | `Ina226_ReadAll()` | min 307.8 / mean 311.8 / max 352.7 µs (200 calls, 0 err) | timer0 |
 | I2C largest single capped wait | ~60 µs (cap 200 µs → 3.3× headroom) | timer0 |
 | I2C command | read 120.4 / 149.2 µs, write 120.2 µs; 1 wire byte = 28.8 µs ⇒ **400 kHz confirmed** | timer0 |
-| CAN frame on the wire | ~222 µs (8-byte std @ 500 kbps); **~7.1 % bus load** at **320 fr/s** (was 4.9 % / 221 fr/s before B13 added 0x150+0x160) | datasheet + candump |
+| CAN frame on the wire | ~222 µs (8-byte std @ 500 kbps); **7.10 % bus load** at **320.0 fr/s** — ⚠️ that is the ECU's OWN share; TOTAL bus occupancy is **8.66 %** at **392.7 fr/s** across three nodes, see §7d (was 4.9 % / 221 fr/s before B13 added 0x150+0x160) | datasheet + candump |
 | `tVelocity` Update interval | **20/20 ms min/max, 0 early fires** | on-target instrumentation |
 
 ⚠️ **WCET is worst-case EXECUTION, not response time.** Early attempts measured with a wall-clock
@@ -149,6 +149,186 @@ compiler/-O-dependent) and never unbounded:
 | **Jitter** | task release vs actual start over N cycles; `tVelocity` interval instrumented on-target (20/20 ms). |
 | **Interrupt latency** | NVIC priority analysis + the kernel's syscall-masking window. |
 | **Bus load** | candump frame count × 222 µs/frame ÷ wall-clock. |
+
+---
+
+## 7b. Safety coverage — the watchdog question, stated once
+
+**Use this wording verbatim:**
+
+> **No hardware watchdog is enabled. Command loss is covered in software by `tSafety`, measured at
+> 155–177 ms over three runs. A hung task is NOT covered.**
+
+| failure | covered? | by what | evidence |
+|---|---|---|---|
+| Jetson stops sending commands | ✅ yes | `tSafety`, prio 11, 10 ms | **155–177 ms, 3/3** (CC_PROMPT_110); re-exercised on the deep path 2026-08-27 |
+| A task hangs or deadlocks (`tSafety` included) | 🔴 **no** | — | nothing recovers the ECU |
+
+⚠️ **The failsafe budget is `CMD_TIMEOUT_MS` + one control cycle = 150 + 33 = 183 ms, not a bare
+150 ms.** The measured window contains one 33 ms cycle by construction.
+
+🔴 **`src/wdt.c` is dead code.** Zero callers (grep); the only branch into WDT code is
+`WDT_ClearInterrupt` from the driver's own ISRs, which can never fire because the peripheral is never
+started (objdump). It ships (~1.2 KB) only because `--gc-sections` is not in effect. **Enabling it is
+a deliberate, tested change — never a pre-demo switch-on.**
+
+---
+
+## 7c. MEASURED execution times — 2026-08-27 (CC_PROMPT_117)
+
+🔴 **This section supersedes the `Ci` column in §2 for every task listed.** §2's figures were either
+`[E]` estimates or, for `tImu`/`tBattery`, **wall-clock brackets that span preemption and therefore
+reported RESPONSE time, not execution** (the defect CC_PROMPT_116 identified).
+
+**Method.** DWT `CYCCNT`, raw core cycles, converted on the host at 16 MHz. A sample is **discarded**
+if a task context switch (`traceTASK_SWITCHED_OUT`) **or** a SysTick kernel tick landed inside the
+bracket, so a surviving sample contains no task preemption and no kernel tick. Residual interference
+is the CAN0 ISR alone (~704/s), which is reported separately rather than folded in silently.
+Instrumented on a temporary branch; the archived image was restored afterwards and proven
+byte-identical.
+
+**Conditions.** Two deep-path missions, wheels-up, driving under PID with steering, each ending in a
+command-loss failsafe; 5 EEPROM saves exercised. Window 1,024 s.
+**Both trips verified**, not assumed: `sf_failsafeCount` read 0 before, 1 after run 1, 2 after run 2 —
+exactly one trip per mission.
+
+| task | measured min | mean | **MAX (WCET)** | N | discarded | §2 said | verdict |
+|---|---|---|---|---|---|---|---|
+| `tSafety` steady | 2.62 µs | 3.11 µs | **41.44 µs** | 75,321 | 0 | 2 µs [E] | 20× the estimate |
+| `tSafety` **trip path** | — | — | **522.31 µs** | — | — | "non-recurrent" | ⚠️ **non-recurrent, but 12.6× the steady body** |
+| `tVelocity` | 28.88 µs | 81.29 µs | **148.19 µs** | 37,660 | 0 | 60 µs [E] | 🔴 **2.47×** |
+| `tRosRx` | 4.75 µs | 36.20 µs | **102.50 µs** | 40,448 | 1,187 | 20 µs [E] | 5.1× |
+| `tBattery` | 365.56 µs | 371.97 µs | **424.94 µs** | 5,991 | 1,541 | 479.9 µs [M] | ✅ doc was **conservative** |
+| `tImu` | 899.56 µs | 935.21 µs | **969.62 µs** | 36,655 | 1,005 | 927 µs [M] | ✅ **doc essentially correct** |
+| `tCanTx` | 35.62 µs | 36.57 µs | **84.12 µs** | 241,452 | 328 | 10 µs [E] | 🔴 **8.4×** |
+| `tRosTx` | 112.06 µs | 112.14 µs | **122.06 µs** | 262 | 150,379 | — (never costed) | ⚠️ under-sampled |
+| `tOdo` | 0.38 µs | 0.38 µs | **0.38 µs** | 7,532 | 0 | 20 µs [E] | ✅ design claim holds |
+| `tBusHealth` | 1.00 µs | 1.00 µs | **1.00 µs** | 7,532 | 0 | small [E] | ✅ |
+| **CAN0 ISR** | 2.00 µs | 16.77 µs | **80.19 µs** | 531,413 | 0 | 15 µs @281/s [E] | 🔴 **704/s, not 281/s** |
+| `tClusterTx` | — | — | — | **0** | 15,065 | 30 µs [E] | 🔴 **NOT MEASURED** |
+| `tHeartbeat` | — | — | — | **0** | 754 | negligible [E] | 🔴 **NOT MEASURED** |
+
+⚠️ **`tClusterTx` and `tHeartbeat` produced ZERO clean samples** — their bodies always span a kernel
+tick, so every sample was discarded. They remain `[E]`. Reporting a preempted maximum as a WCET is the
+exact error this exercise exists to correct, so nothing is claimed for them.
+⚠️ **`tRosTx` survived only 262 of 150,641 samples** for the same reason. Treat 122.06 µs as
+indicative, not as a bound.
+
+### 7c.1 Recomputed CPU utilization
+
+| basis | `U` | headroom |
+|---|---|---|
+| **Actual load** (mean × measured rate) + 2.0 % kernel tick | **≈ 12.3 %** | ~87.7 % |
+| **Worst case** (WCET × rate, `tSafety` steady, ISR at max) + tick | **≈ 19.8 %** | ~80.2 % |
+| §1 headline as published | 8.6 % | ~91.4 % |
+
+🔴 **The 8.6 % headline is understated — actual measured load is ≈ 12.3 %, about 1.4×.** The gap is
+not one bad estimate but three:
+
+- **`tRosTx` was never costed at all** — §2 leaves its `Ui` blank. Measured it is **≈ 2.24 %**, the
+  single largest omission.
+- **`tCanTx`** 0.22 % → **≈ 1.17 %** (the estimate assumed 10 µs of CPU per frame; it is 36.6 µs).
+- **CAN0 ISR** 0.42 % → **≈ 1.18 %**, mostly because the rate is **704 IRQ/s, not 281** — the
+  estimate counted the ECU's own frames and missed both the RX load from other nodes and the
+  TX-complete interrupt.
+
+✅ `tImu` at 4.68 % vs the estimated 4.64 % is **confirmed** — the one big number the doc already had
+right.
+
+### 7c.2 Recomputed response time for `tVelocity`
+
+```
+R = C(tVelocity) + interference from everything of HIGHER priority
+  = 148.19            (measured [M], vs 60 µs assumed)
+  +  41.44            tSafety, prio 11 - the ONLY task above tVelocity
+  +  80.19            CAN0 ISR
+  +  20.00            1 kHz kernel tick
+  => R = 289.8 µs   against a 20,000 µs deadline  ->  69x margin
+```
+
+**Published figure was 95 µs / ~210×. The corrected figure is ≈ 290 µs / ~69×.** Still a very large
+margin, and the conclusion ("bounded by hardware choices, not by scheduling") is unchanged — but the
+number itself moved by 3×.
+
+🔑 **Why this figure stays meaningful even though `tImu` is the biggest consumer in the system:**
+`tImu` is **priority 7**; `tVelocity` is **priority 10**. A lower-priority task cannot delay a
+higher-priority one, so `tImu`'s 969.62 µs contributes **exactly zero** to `tVelocity`'s response
+time. The criticality-ordered ladder is what buys this, and it is the reason the control loop is
+insulated from the slowest thing on the ECU.
+
+### 7c.3 Stack high-water marks — after the deep-path mission, both runs
+
+`uxTaskGetStackHighWaterMark`, in **free words remaining** (lower = worse). Two missions; both runs
+agreed exactly.
+
+| task | size | idle | run 1 | run 2 | worst used | margin |
+|---|---|---|---|---|---|---|
+| `tSafety` | 128 | 93 | **61** | **61** | 67 | 1.91× |
+| `tVelocity` | 128 | 62 | 62 | 62 | 66 | 1.94× |
+| `tRosRx` | 128 | 51 | **45** | **45** | 83 | 🔴 **1.54×** |
+| `tBattery` | 192 | 83 | 83 | 83 | 109 | 1.76× |
+| `tImu` | 192 | 108 | **103** | **103** | 89 | 2.16× |
+| `tRosTx` | 160 | 67 | 67 | 67 | 93 | 1.72× |
+| `tClusterTx` | 160 | 62 | 62 | 62 | 98 | 1.63× |
+| `tOdo` | 128 | 95 | 95 | 95 | 33 | 3.88× |
+| `tBusHealth` | 192 | 159 | 159 | 159 | 33 | 5.82× |
+| `tHeartbeat` | 160 | 90 | 90 | 90 | 70 | 2.29× |
+
+🔴 **`tRosRx` is at 1.54×, below the ≥1.60× margin policy this project claims.** The slide's
+"Stack headroom ≥1.6× on every task" is **false as written** — either raise
+`ROSRX_TASK_STACK_WORDS` from **128 to 160** (→ 1.93× margin; costs 128 bytes of RAM against
+20,368 bytes of headroom), or restate the claim.
+
+🔑 **The mission mattered, exactly as warned.** An idle run reports `tSafety` at 93 free words; the
+failsafe **trip path** consumes 32 more, leaving 61. Trimming that stack on the idle figure would have
+removed a third of the margin on the one task whose job is to stop the vehicle.
+
+### 7c.4 Boot time
+
+**Reset-release → first `Can_Transmit` = 511,415 core cycles (`0x7CDB7`) = 31.963 ms**, identical to the cycle
+across three runs (DWT `CYCCNT` zeroed by the debugger at reset, hardware breakpoint on
+`Can_Transmit`). Essentially all of it is **pre-scheduler hardware init** — `xTickCount` reads ~0 when
+the first frame goes out, so the FreeRTOS side contributes almost nothing.
+
+⚠️ This excludes supply ramp and power-on reset, which only a physical power cycle adds. Treat
+**31.96 ms as the firmware boot time** and as a lower bound on power-on → first frame.
+
+---
+
+## 7d. Bus composition — per-ID, measured 2026-08-27
+
+`candump` on the Jetson, 25,000 frames over 63.7 s, vehicle in normal operating configuration.
+
+| ID | signal | measured | designed | ratio |
+|---|---|---|---|---|
+| `0x100` | VelocityCommand (Jetson) | 29.99 Hz | 30 | 1.000 |
+| `0x110` | VelocityFeedback | 100.01 Hz | 100 | 1.000 |
+| `0x120` | SteeringCommand (Jetson) | 29.99 Hz | 30 | 1.000 |
+| `0x130` | SteeringFeedback | 99.99 Hz | 100 | 1.000 |
+| `0x150` | ImuAccel | 50.00 Hz | 50 | 1.000 |
+| `0x160` | ImuGyroFlags | 50.00 Hz | 50 | 1.000 |
+| `0x200` | VehicleStatus | 9.99 Hz | 10 | 0.999 |
+| `0x210` | BatteryStatus | 10.01 Hz | 10 | 1.001 |
+
+✅ **Every ECU-originated ID is on its designed period. Zero drift.** This is the check a frames/s
+total structurally cannot make, and it comes back clean.
+
+| source | fr/s | bus load |
+|---|---|---|
+| **This ECU** | 320.0 | **7.10 %** |
+| Jetson (`0x100`, `0x120`) | 60.0 | 1.33 % |
+| **A third node** — `0x170` `0x220` `0x230` `0x240` `0x500` `0x7A0`–`0x7A3` | 12.8 | 0.22 % |
+| **TOTAL BUS** | **392.7** | **8.66 %** (10.53 % worst-case bit stuffing) |
+
+⚠️ **The published "~7.1 % bus load" is the ECU's own share, not bus occupancy.** It is exactly right
+on its own basis — measured 7.10 % — but as a system claim it understates the wire by about a fifth.
+🔴 **Nine IDs on this bus appear in neither `robot.dbc` nor any ECU design document.** The Jetson's own
+TX rate is 61 fr/s, which accounts for `0x100`/`0x120` only, so a **third transmitter** is present.
+Identify it before quoting bus-load figures externally.
+
+**Error counters over the same period: zero.** ECU-side `CANERR` = TEC 0 / REC 0, no bus-off, no
+error-passive, no error-warning. Jetson-side `ip -s link show can0`: 0 bus-errors, 0 arbitration-lost,
+0 error-warn, 0 error-pass, 0 bus-off, 0 dropped, across 1,076,017 RX packets.
 
 ---
 

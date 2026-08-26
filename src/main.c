@@ -29,11 +29,36 @@
  *   it is the I2C read - so its ~480 us has the millisecond to itself.
  *
  * ---------------------------------------------------------------------------
- *  BENCH-ONLY: there is NO RX command-loss failsafe/watchdog (deferred pending
- *  WDT MCAL, see jetson_comm.c). If the Jetson stops sending, the LAST velocity
- *  setpoint PERSISTS (the car keeps driving) and steering holds its last angle.
- *  A failsafe is a PREREQUISITE before any on-ground operation. Keep an operator
- *  ready to cut power / RESET. First power-on: wheels OFF the ground.
+ *  SAFETY COVERAGE. Corrected 2026-08-27 (CC_PROMPT_117) - this block used to
+ *  say "there is NO RX command-loss failsafe/watchdog (deferred pending WDT
+ *  MCAL)". That was written before B10 and is now WRONG IN BOTH DIRECTIONS:
+ *  the RX failsafe DOES exist, and the watchdog is not merely deferred, it is
+ *  absent by decision. The accurate statement, to be used verbatim in any
+ *  writeup:
+ *
+ *      No hardware watchdog is enabled. Command loss is covered in software by
+ *      tSafety, measured at 155-177 ms over three runs. A hung task is NOT
+ *      covered.
+ *
+ *  Concretely:
+ *    - COVERED: the Jetson stops sending -> tSafety (prio 11, 10 ms period)
+ *      stops the drive and latches vc_inhibit. Measured 155-177 ms, 3/3
+ *      (CC_PROMPT_110), and re-exercised on the deep path 2026-08-27. Budget is
+ *      CMD_TIMEOUT_MS + one 33 ms control cycle = 183 ms, NOT a bare 150.
+ *      ⚠️ The TRIP path costs 522 us of execution against tSafety's 41 us
+ *      steady body, and consumes 32 more words of stack than an idle run - so
+ *      it is the branch that sizes this task, and it is NON-RECURRENT (once per
+ *      episode, not once per 10 ms period).
+ *    - NOT COVERED: a hung or deadlocked task, tSafety included. src/wdt.c is
+ *      compiled into the image but has ZERO callers (verified by grep and by
+ *      objdump: the only branch into WDT code is WDT_ClearInterrupt from the
+ *      driver's own ISRs, which can never fire because the peripheral is never
+ *      started). It is dead code, not a safety mechanism.
+ *
+ *  Enabling the WDT is a deliberate, TESTED change - never a pre-demo switch-on.
+ *  An untested feed path reboots the ECU mid-drive.
+ *  Steering holds its last angle in every case (open loop, no failsafe centre).
+ *  First power-on: wheels OFF the ground.
  * ---------------------------------------------------------------------------
  *
  * INIT ORDER (SYSTEM_INTEGRATION_AUDIT.md §2, derived from header prereqs):
