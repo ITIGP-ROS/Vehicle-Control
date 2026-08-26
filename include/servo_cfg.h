@@ -44,7 +44,18 @@
  *                  up to 3000us were verified to move it no further. The LINKAGE
  *                  has more right travel; this servo cannot reach it. */
 #define SERVO_MIN_PULSE_US              (600U)    /* full LEFT  (servo-authority edge) */
-#define SERVO_CENTER_PULSE_US           (1450U)   /* wheels-straight center / failsafe */
+#define SERVO_CENTER_PULSE_US           (1520U)   /* wheels-straight center / failsafe */
+/* RE-MEASURED 2026-08-19 (CC_PROMPT_80) after the servo replacement and the 180-degree
+ * horn re-index. Was 1450. Marked from BOTH directions, three pairs, wheels UP:
+ *   backlash band 140 us (edges 1450 and 1590) -> midpoint 1520.
+ * A SINGLE-DIRECTION mark lands on an EDGE of that band, not the middle - the first
+ * report of 1590 was exactly that, and 1450 happens to be the other edge.
+ * With 1520 the authority is EXACTLY symmetric: 850 us each side (measured edges
+ * 670 and 2370). The old 1450 put commanded-zero 70 us LEFT of true straight, which
+ * is what made the right turn look shallow AND made the vehicle turn only 0.79x of
+ * commanded - one number, three symptoms.
+ * MUST be kept equal to TIMER_PWM_INIT_PULSE_US - there is NO compile-time guard on
+ * the centre (timer_pwm_cfg.h guards MIN and MAX only). */
 #define SERVO_MAX_PULSE_US              (2500U)   /* full RIGHT (servo saturation)     */
 
 /*******************************************************************************

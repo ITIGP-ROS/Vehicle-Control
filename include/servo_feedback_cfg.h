@@ -56,7 +56,10 @@
  * BEFORE any hand-turning shows 0x130 = +0.00692 rad while 0x120 commanded exactly
  * 0.00000 across 795 frames, i.e. pot 1950. Re-checked after: 1942 under load,
  * 1956 at rest. */
-#define SERVO_FB_POT_CENTER             (1950)
+#define SERVO_FB_POT_CENTER             (1921)   /* RE-MEASURED 2026-08-19 at the new
+                                                  * 1520 us centre, wheels up. Was 1950.
+                                                  * TELEMETRY ONLY - 0x130 is reported,
+                                                  * never acted on (steering is open loop). */
 
 /* Radians per ADC count. Derived from the RIGHT endpoint (largest count span =
  * best resolution), which also makes the right side exact:

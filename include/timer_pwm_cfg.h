@@ -62,7 +62,9 @@
  * wheels parallel, re-measured 2026-07-30), NOT the geometric clamp midpoint -
  * that would be 1550us. The servo self-centers to the real straight-ahead pulse
  * at boot. The servo HAL re-asserts center on top (servo.c). */
-#define TIMER_PWM_INIT_PULSE_US         (1450U)
+#define TIMER_PWM_INIT_PULSE_US         (1520U)   /* RE-MEASURED 2026-08-19, was 1450.
+                                                   * MUST equal SERVO_CENTER_PULSE_US;
+                                                   * NOTHING checks this at compile time. */
 
 /*******************************************************************************
  *                          Derived Constants (Do Not Modify)                  *
