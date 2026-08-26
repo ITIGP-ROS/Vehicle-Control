@@ -108,13 +108,23 @@ and the `[M]`easured / `[E]`stimated tag on every value are in
 
 | Metric | Value | |
 |---|---|---|
-| **CPU utilization** | **≈ 8.6 %** (of which the 1 kHz kernel tick is 2.0 %) | ~91 % headroom |
-| **Schedulability — RM bound** | 8.6 % against the n=11 bound of 71.4 % | passes ~8× |
-| **Schedulability — RTA (exact)** | `R(tVelocity)` ≈ **95 µs** vs a **20 ms** deadline | ~210× margin |
-| **Worst-case interrupt latency** | ≈ **4 µs** masked / 0.75 µs above the syscall ceiling | |
-| **RAM** | **37.8 %** of 32 KB, after trimming stacks to measured worst-case | ≥1.60× margin on every task |
-| **Flash** | ~59 KB of 256 KB (the kernel is ~11 KB of it) | |
+| **CPU utilization** | **≈ 12.3 % measured** (1 kHz kernel tick is 2.0 % of it) | ~88 % headroom · worst case 19.8 % |
+| **Schedulability — RM bound** | 12.3 % against the n=11 bound of 71.4 % | passes ~5.8× |
+| **Schedulability — RTA (exact)** | `R(tVelocity)` ≈ **290 µs** vs a **20 ms** deadline | ~69× margin |
+| **Boot time** | **31.963 ms**, reset → first CAN frame | 3 runs, identical to the cycle |
+| **Worst-case interrupt latency** | ≈ **4 µs** masked / 0.75 µs above the syscall ceiling | derived, not measured |
+| **RAM** | **37.8 %** of 32 KB (12,400 B) | ⚠️ **1.54×** margin on `tRosRx`, ≥1.63× on the rest |
+| **Flash** | **59,260 B** of 256 KB (the kernel is 11,008 B of it) | |
 | **Memory model** | **Static allocation** — no heap in the image | MISRA-C:2012 Dir 4.12 |
+| **CAN bus load** | **7.10 %** this ECU's share at 320 fr/s | total bus occupancy **8.66 %** across 3 nodes |
+| **CAN errors** | TEC 0 / REC 0, no bus-off, both ends | over 1,076,017 RX packets |
+
+> **⚠️ These figures were re-measured on 2026-08-27 and several moved.** CPU was published as
+> 8.6 % and RTA as 95 µs; both were computed from *estimated* execution times, and one task
+> (`tRosTx`) was never costed at all. The corrected values above come from DWT cycle counting with
+> preemption excluded. **`tImu` (927 µs) and `tBattery` (479.9 µs) were confirmed correct.**
+> Two tasks — `tClusterTx` and `tHeartbeat` — still have **no** valid execution measurement and
+> remain `[E]`; see the metrics document rather than assuming a number for them.
 
 Notes on how those numbers were obtained, because the method is the point:
 
@@ -122,14 +132,25 @@ Notes on how those numbers were obtained, because the method is the point:
   assignment is deliberately **criticality-monotonic, not rate-monotonic** —
   `tSafety` has a 20× longer period than `tRosTx` yet outranks it — so the Liu &
   Layland bound is only indicative and response-time analysis is the actual proof.
-- **Timing is measured with the free-running 16 MHz TIMER0**, whose read is a
-  single tear-free `LDR`, so no debug probe is needed on the vehicle.
-  ⚠️ Wall-clock measurement across a preemptible region gives **response time**,
-  not execution time; the document labels which is which rather than conflating them.
+- **Execution time is measured with DWT `CYCCNT`, not a wall clock.** ⚠️ This is the
+  correction that moved the numbers. A free-running-timer bracket spans preemption and
+  therefore reports **response** time; used as a WCET it is simply the wrong quantity.
+  The current figures discard any sample in which a context switch **or** a kernel tick
+  occurred inside the bracket, so a surviving sample contains neither. Where no clean
+  sample could be obtained, the row stays `[E]` and **no number is claimed** — reporting a
+  preempted maximum as a WCET is the exact defect this method exists to remove.
+- **The measurement build is temporary and is never shipped.** It lives on a branch, and the
+  archived production image is re-flashed and proven byte-identical afterwards.
 - **Stacks are trimmed against a deliberate deep-path mission** — driving under
   PID, a command-loss failsafe *while driving*, and an EEPROM save — not against
   an idle run. Idle-run high-water marks are lower bounds and trimming on them is
-  how a stack overflow ships.
+  how a stack overflow ships. **This is not theoretical:** an idle run reports `tSafety`
+  with 93 free words; the failsafe *trip* path consumes 32 more, leaving 61. Trimming on
+  the idle figure would have removed a third of the margin on the one task whose job is
+  stopping the vehicle.
+- ⚠️ **`tRosRx` currently sits at 1.54×, below the ≥1.60× margin policy stated here.**
+  Raising `ROSRX_TASK_STACK_WORDS` from 128 to 160 restores it to 1.93× at a cost of
+  128 bytes, against 20,368 bytes of free RAM. Recorded rather than quietly rounded.
 - **Every wait in the firmware is time-bounded, never iteration-bounded.** An
   iteration cap's duration changes with the optimiser; a TIMER0 deadline does not.
 
@@ -208,12 +229,20 @@ Flash: [==        ]  22.6% (used 59260 bytes from 262144 bytes)
 
 ## Safety features
 
+- **No hardware watchdog is enabled. Command loss is covered in software by
+  `tSafety`, measured at 155–177 ms over three runs. A hung task is NOT covered.**
+  `src/wdt.c` compiles into the image but has zero callers; it is dead code, not a
+  safety mechanism. Enabling it is a deliberate, tested change — an untested feed
+  path reboots the ECU mid-drive.
 - **RX command-loss failsafe.** If no *accepted* `0x100`/`0x120` arrives for
   150 ms — a value derived from the host's measured 30 Hz cadence, at 2.9× the
   observed p99 inter-frame gap — the drive is zeroed and **the steering is
   HELD, never re-centred**: snapping the wheels straight mid-corner is its own
   hazard. It counts *accepted* commands, not arrivals, so a partially-crashed
   host spraying malformed frames cannot hold the failsafe off.
+  ⚠️ **Quote the budget as `150 ms + one 33 ms control cycle` = 183 ms, not a bare 150.**
+  The measured 155–177 ms window contains one control cycle by construction, so a bare
+  150 makes correct measurements look like overruns.
 - **The stop cannot be undone by a race.** A latched inhibit flag means that even
   if the failsafe preempts the control loop mid-update, the next update
   *re-asserts* the stop rather than overwriting it — self-healing under any

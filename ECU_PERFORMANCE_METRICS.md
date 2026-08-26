@@ -65,16 +65,25 @@
 
 ## 3. CPU utilization & schedulability
 
-**Total:** `U = Σ Ci/Ti ≈ 0.0864 ≈ 8.6 %` → headroom `1 − U ≈ 91.4 %`.
+> 🔴 **SUPERSEDED BY §7c.1 / §7c.2 (2026-08-27).** The figures in this section were derived from
+> **estimated** `Ci`. They are kept for the derivation, which is still correct; the inputs moved.
+> **Current values: `U ≈ 12.3 %` measured (19.8 % worst case) and `R(tVelocity) ≈ 290 µs` (~69×).**
+
+**Total (superseded):** `U = Σ Ci/Ti ≈ 0.0864 ≈ 8.6 %` → headroom `1 − U ≈ 91.4 %`.
 ⚠️ Was 4.9 % before B13. The jump is almost entirely `tImu`'s **measured** 927 µs against an
 estimated 150 µs — a bad estimate corrected by
-measurement, not a regression in anything that already existed.
+measurement, not a regression in anything that already existed. ✅ **`tImu`'s 927 µs was
+subsequently CONFIRMED by execution measurement** (max 969.62 µs); the 8.6 % total was wrong for
+other reasons — see §7c.1.
 
-- **Rate-Monotonic sufficient test:** for n=11, the RM bound is `n(2^(1/n) − 1) ≈ 71.4 %`. `U = 8.6 %` is
-  ~8× under it → sufficient condition satisfied. (Note: our priority order is by **criticality**, not
+- **Rate-Monotonic sufficient test:** for n=11, the RM bound is `n(2^(1/n) − 1) ≈ 71.4 %`.
+  At the **measured** `U = 12.3 %` that is ~5.8× under it → sufficient condition still satisfied.
+  (Note: our priority order is by **criticality**, not
   strictly rate-monotonic — `tSafety` outranks faster tasks — so RM is indicative; RTA is the exact test.)
-- **Response-Time Analysis (exact) for the hard deadline:** `R(tVelocity) ≈ 95 µs` against its **20 ms**
-  QEI deadline → **~210× margin**. (Improved from 135 µs when the priority ladder was settled — moving
+- **Response-Time Analysis (exact) for the hard deadline:** ~~`R(tVelocity) ≈ 95 µs` → ~210×~~ —
+  **superseded: `R(tVelocity) ≈ 290 µs` against its 20 ms QEI deadline → ~69× margin**, from the
+  measured `C(tVelocity) = 148.19 µs` rather than the 60 µs previously assumed (§7c.2). The
+  derivation below is unchanged. (Improved from 135 µs when the priority ladder was settled — moving
   `tRosRx` below `tVelocity` removed an interferer.)
 - **No priority inversion possible:** no task holds a lock across a context switch. Cross-task data uses
   coherent single-commit snapshots (battery, steering, wheel-ticks) or atomic single-word reads
